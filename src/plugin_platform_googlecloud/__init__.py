@@ -820,7 +820,7 @@ class GoogleCloudPlugin(MachinePlugin):
         interface = super().attach(app, login)
         with self._rt.lock:
             self._rt.config = None
-        if getattr(app, "NAME", "") == PLATFORM:
+        if getattr(app, "NAME", "") == PLATFORM and not getattr(app, "once", False):  # never a one-shot command's
             self._start(login)
         return interface
 

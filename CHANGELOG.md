@@ -38,6 +38,8 @@ finding), fixed for Google Cloud. Needs liminal-libs>=1.49.2.
     changed";
   - the API card links Google's guest agent page.
 
+The platform's one-shot commands (status, machine: `PlatformApp.once`, liminal-platform 0.20.1) start none of its background work.
+
 ## 0.1.0 (2026-11-11)
 
 The first release (the user: "lets roll plugins for EC2, vultr, azure and google cloud", choosing "Free changes only";

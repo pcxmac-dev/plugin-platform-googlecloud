@@ -324,3 +324,15 @@ def test_a_plugin_made_by_the_registry_is_the_platforms(made):
     from plugin_platform_googlecloud import MACHINE
 
     assert isinstance(MACHINE, GoogleCloudPlugin) and MACHINE.status()["present"] is False
+
+
+def test_the_platforms_one_shot_command_starts_nothing(made):
+    """The platform's status and machine commands attach it to answer and end (PlatformApp.once, liminal-platform
+    0.20.1): nothing of it runs on its own then."""
+    p, fake = made()
+    p.attach(type("Once", (), {"NAME": "platform", "once": True})(), Pairs(settings_of(GOOGLECLOUD_DDNS_HOSTS="home.example.com")))
+    try:
+        time.sleep(0.1)
+        assert not p.working and fake.requests == []
+    finally:
+        p.detach()
