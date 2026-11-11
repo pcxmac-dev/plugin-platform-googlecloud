@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plugin-platform-googlecloud"
+version = "0.1.0"  # the plugin's own release (CHANGELOG.md); the platform shows it on the plugin's page
+description = "Google Cloud for Liminal's platform: a project's servers, disks, addresses, firewall rules, Cloud DNS zones and project-wide SSH keys through Google's APIs, the free changes each confirmed, and Dynamic DNS through Cloud DNS."
+readme = "README.md"
+requires-python = ">=3.10"
+# the library it plugs into (the machine kind: liminal_libs.machines; plugin API 2.2, its APIs on its page; the clouds'
+# REST client and Dynamic DNS keeper: machines.rest, machines.ddns; the Login interface: liminal_libs.apps), and the
+# RS256 signing of a service account's JWT (cryptography)
+dependencies = ["liminal-libs>=1.49.0", "cryptography>=42"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.entry-points."liminal.providers"]
+googlecloud = "plugin_platform_googlecloud"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
