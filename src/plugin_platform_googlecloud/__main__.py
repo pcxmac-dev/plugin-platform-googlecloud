@@ -8,7 +8,8 @@
     ddns [--now]                        a Dynamic DNS pass: a host's record set where it differs (--now: every host)
     firewalls                           the VPC firewall rules and the servers each reaches
     keys                                the project-wide SSH keys
-    power NAME on|off|reboot            a server started, stopped, or reset (hard: asked twice), each asked "yes" first
+    power NAME on|off|reboot            a server started (its charges resume: asked twice), stopped, or reset (hard:
+                                        asked twice), each asked "yes" first
     set ZONE NAME TYPE DATA [--ttl N]   a record set (every other record kept), asked "yes" first
     remove ZONE NAME TYPE DATA          a record's value removed, asked "yes" first
 
@@ -21,7 +22,8 @@ import sys
 
 from liminal_libs.machines.rest import RestError
 
-from . import ACCEPT_RESET, MACHINE, STATES, when
+from . import ACCEPT_COSTS, ACCEPT_RESET, MACHINE, STATES, when
+from .records import Refusal
 
 
 def parser() -> argparse.ArgumentParser:
@@ -91,8 +93,8 @@ def main(argv: list[str] | None = None, plugin=None, out=None, err=None, ask=Non
             lines = [f"{r['name']:<40} {r['type']:<6} {r['ttl']:>6}  {r['data']}" for r in answer] or ["no records"]
         elif what == "ddns":
             answer = p.ddns_update(force=args.now)
-            lines = [f"{h['host']:<36} {h['address'] or '–':<16} {h['result']} (checked {when(h['checkedAt'])})" for h in answer] \
-                or ["no host is in a public Cloud DNS zone of the project"]
+            lines = [f"{h['host']:<36} {h['address'] or '–':<16} {h['result']} (checked {when(h['checkedAt'])})"
+                     for h in answer["hosts"]] or ["no host is in a public Cloud DNS zone of the project"]
         elif what == "firewalls":
             answer = p.firewalls()
             lines = [f"{r['name']:<32} {r['rule']}" + (" [off]" if r["disabled"] else "")
@@ -109,10 +111,18 @@ def main(argv: list[str] | None = None, plugin=None, out=None, err=None, ask=Non
                 return 1
             zone = found[0]["zone"]
             if args.to == "on":
-                if not confirmed(f"{args.name} is started: its vCPUs and memory bill again while it runs.", ask, say):
+                if not confirmed(f"{args.name} is started.", ask, say):
                     tell("not asked: no yes")
                     return 1
-                answer = p.start_server(zone, args.name)
+                try:
+                    answer = p.start_server(zone, args.name)  # refused, naming the charges it resumes: asked again
+                except Refusal as refused:
+                    if refused.accept != ACCEPT_COSTS:
+                        raise
+                    if not confirmed(f"Again: {refused}.", ask, say):
+                        tell("not asked: no yes")
+                        return 1
+                    answer = p.start_server(zone, args.name, **{ACCEPT_COSTS: True})
             elif args.to == "off":
                 if not confirmed(f"{args.name} is shut down (up to 120 seconds for its guest); its disks and static "
                                  "addresses keep billing, an ephemeral address is let go.", ask, say):

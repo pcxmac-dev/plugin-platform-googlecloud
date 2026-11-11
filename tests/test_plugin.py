@@ -3,11 +3,12 @@ table from what was read (no request made to answer the status), valid while a p
 secrets taken out, what it learned of its APIs, and its reading in the background while attached. Over the stand-ins."""
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
 
-from conftest import ACCOUNT, PEM, PROJECT, FakeGoogle, Pairs, err, key_json, settings_of
+from conftest import ACCOUNT, PEM, PROJECT, Charts, FakeGoogle, Pairs, Platform, err, key_json, settings_of
 from liminal_libs.machines.rest import RestError
 from plugin_platform_googlecloud import NOT_SET, STOPPED_BILLS, GoogleCloudPlugin
 from plugin_platform_googlecloud.api import ENDPOINTS, GoogleCloud
@@ -232,21 +233,80 @@ def test_what_it_learned_of_its_apis_asks_nothing(made, env):
     assert all(f["Last answer"].startswith("HTTP 200") for f in facts.values())
 
 
-def test_attached_it_reads_in_the_background_and_detached_nothing_runs(made):
+def wait_for(check, most_s: float = 10.0) -> bool:
+    deadline = time.monotonic() + most_s
+    while time.monotonic() < deadline:
+        if check():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_attached_by_the_platform_it_reads_in_the_background_and_detached_nothing_runs(made):
     p, fake = made()
-    interface = p.attach(object(), Pairs(settings_of()))
+    interface = p.attach(Platform(), Pairs(settings_of()))
     try:
         assert "refresh" in interface["hooks"] and p.working
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and p.status().get("readAt") is None:
-            time.sleep(0.05)
-        assert p.status()["readAt"] and fake.calls("GET")
+        assert wait_for(lambda: p.status().get("readAt") is not None) and fake.calls("GET")
     finally:
         p.detach()
     assert not p.working and p.login is None and p.app is None
     asked = len(fake.requests)
     time.sleep(0.2)
     assert len(fake.requests) == asked
+
+
+@pytest.mark.parametrize("app", [Charts(), object()])
+def test_attached_by_another_app_it_starts_no_reading(made, app):
+    """The charts app run alone attaches every plugin it finds: no background reading starts but the platform's."""
+    p, fake = made()
+    p.attach(app, Pairs(settings_of(GOOGLECLOUD_DDNS_HOSTS="home.example.com")))
+    try:
+        time.sleep(0.2)
+        assert not p.working and fake.requests == []
+    finally:
+        p.detach()
+
+
+def test_a_pass_under_way_ends_once_detached_reading_no_settings_and_writing_nothing(made, env, monkeypatch):
+    """Disabled while a Dynamic DNS pass waits on Google's answer longer than the detach waits for it: the pass ends
+    there. It reads no settings again (not from the process's environment, where a key saved on the page is too) and
+    sends no change, though the record it read was its own to make."""
+    import plugin_platform_googlecloud as module
+    import plugin_platform_googlecloud.settings as settings_mod
+
+    monkeypatch.setattr(module, "JOIN_S", 0.2)
+    env(settings_of(GOOGLECLOUD_DDNS_HOSTS="home.example.com"))  # the process's environment holds a key too
+    p, fake = made()
+    reached, release = threading.Event(), threading.Event()
+    real = fake._route
+
+    def slow(method, host, path, query, body):
+        if method == "GET" and path.endswith("/rrsets") and query.get("type") == "A":  # the pass's read of the host
+            reached.set()
+            release.wait(10)
+        return real(method, host, path, query, body)
+    fake._route = slow
+    reads: list = []
+    original = settings_mod.read
+
+    def counted(login=None):
+        reads.append((login, threading.current_thread().name))
+        return original(login)
+    monkeypatch.setattr(settings_mod, "read", counted)
+    p.attach(Platform(), Pairs(settings_of(GOOGLECLOUD_DDNS_HOSTS="home.example.com")))
+    try:
+        assert reached.wait(10)  # the worker's pass is in its read
+        started = time.monotonic()
+        p.detach()
+        assert time.monotonic() - started < 2 and p.working  # the detach waited its while; the thread still in its read
+        reads.clear()
+    finally:
+        release.set()
+    assert wait_for(lambda: not p.working)
+    assert [r for r in reads if r[1] == "googlecloud"] == []  # no settings read by the ended pass
+    assert not any(r["method"] == "POST" and r["path"].endswith("/changes") for r in fake.requests)
+    assert fake.rrsets["example-com"] and not any(s["name"] == "home.example.com." for s in fake.rrsets["example-com"])
 
 
 def test_a_new_key_lets_go_of_what_was_read(made, env):

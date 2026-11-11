@@ -21,8 +21,8 @@ def test_every_plugin_here_conforms_to_the_class_contract():
     assert found and all(p.api == "2.2" and not p.is_record for p in found)
     assert {p.SYSTEM for p in found} == {"platform"} and {p.KIND for p in found} == {"machine"}
     assert {(p.name, p.title, p.order, p.ICON, p.version) for p in found} == {("googlecloud", "Google Cloud", 765,
-                                                                                "googlecloud", "0.1.0")}
-    assert module.__version__ == "0.1.0" and problems(module.MACHINE.apis) == []
+                                                                                "googlecloud", "0.1.1")}
+    assert module.__version__ == "0.1.1" and problems(module.MACHINE.apis) == []
     assert module.MACHINE.interface()["apis"] == ["Compute Engine API", "Cloud DNS API", "Cloud Billing API",
                                                   "Google OAuth 2.0"]
 
@@ -35,7 +35,7 @@ def test_its_settings_are_pairs_named_by_their_variables():
     hooks = p.interface()["hooks"]
     assert {"present", "status", "refresh", "servers", "start_server", "stop_server", "reset_server", "firewalls",
             "add_firewall_rule", "remove_firewall_rule", "domains", "records", "set_record", "remove_record", "ssh_keys",
-            "add_ssh_key", "remove_ssh_key", "ddns_update"} <= set(hooks)
+            "add_ssh_key", "remove_ssh_key", "ddns_update", "ddns_take_over"} <= set(hooks)
     assert "check" not in hooks and "setup" not in hooks and "run" not in hooks
 
 

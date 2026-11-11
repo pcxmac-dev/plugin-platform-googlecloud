@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.1.1 (2026-11-11)
+
+What an audit of the cloud plugins found before any key went in (session 87405e6a: eight reviewers, a skeptic per
+finding), fixed for Google Cloud. Needs liminal-libs>=1.49.2.
+
+- **Start is asked twice.** Starting a stopped server resumes its charges, against the user's "Free changes only", so
+  a start is refused first (`accept_costs`). The refusal names what bills again: the machine type with its vCPUs and
+  memory, its GPUs, a premium image's licence. The command line asks "yes" twice too.
+- **The firewall's risk check is wider.** Asked twice: a rule denying SSH (a lockout); an allow from the whole internet
+  of anything but the web's ports 80 and 443 (RDP 3389, Docker's 2375, SSH moved to 2222, any other port or range,
+  every port, ping); removing the rule letting SSH or RDP in to a server it reaches. Before, a deny of tcp:22 from
+  everywhere, or RDP opened to the internet, went through on one confirmation.
+- **Dynamic DNS changes only what is its own**, through the library's Keeper (1.49.2):
+  - a host holding another address, or several, is left as it is, with **Take over…** on its row (the hook
+    `ddns_take_over`, asked once confirmed, then a pass for that host);
+  - what is its own is kept in `googlecloud/ddns.json` under the platform's folder, so its old address is still known
+    after a restart;
+  - **Update DNS now** is a confirmed form;
+  - the record is read again just before a write, and left as it is if it changed meanwhile to what is not its own;
+  - a host taken out of the settings is let go.
+  Before, `@.example.com` in the hosts setting pointed a live website at home within a minute, unasked.
+- **A pass ends once the plugin is detached.**
+  - Before, a disable during a pass waited 10 s and left the pass running. Its next request read the settings from
+    the process's environment and sent the DNS change.
+  - Now the background works with the settings of the login it was attached with, and its stop is checked before each
+    part, each request of a pass and each write. Nothing more is read or written once it is set. `working` stays true
+    until that thread has ended.
+- **The background starts only when the platform attaches the plugin.** The charts app run alone attaches every plugin
+  it finds, and now starts none of this.
+- **A second confirmation counts only when it is exactly true** (`accept_*` is `True`). Before, "false" or 1 from a
+  program of its own passed as one.
+- **Smaller fixes:**
+  - adding a project-wide SSH key says that Google's guest agent puts the account in google-sudoers, whose members
+    get sudo;
+  - a DNS change that times out, or meets Google's own trouble, says it may have been made, not "refused, nothing
+    changed";
+  - the API card links Google's guest agent page.
+
 ## 0.1.0 (2026-11-11)
 
 The first release (the user: "lets roll plugins for EC2, vultr, azure and google cloud", choosing "Free changes only";

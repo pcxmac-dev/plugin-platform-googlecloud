@@ -29,7 +29,8 @@ cloud), read every quarter of an hour while it is attached to the platform app (
 Only what costs nothing (the user: "Free changes only"), each through a form on the platform's page that names the
 change before it is sent:
 
-- **Start…** a stopped server. Starting one does restart its vCPU and memory charges: the confirmation says so.
+- **Start…** a stopped server. Starting one restarts its charges (its vCPUs and memory, any GPU, a premium image's
+  licence), so it is asked twice: the second confirmation names the machine type, its shape and its GPUs.
 - **Stop…** a running server: Google sends its guest an ACPI shutdown and gives it up to 120 seconds (30 for a Spot
   VM). The confirmation names what keeps billing (its disks, its static addresses) and the ephemeral address it lets
   go (started again, a server gets another: a DNS record holding it is then wrong). A server with a Local SSD is
@@ -42,11 +43,19 @@ change before it is sent:
   values of its type; a TXT, MX, CAA, SRV or NS value is added beside the others. The zone's own SOA, NS and DNSSEC
   records, record sets with a routing policy and forwarding or peering zones are not written here.
 - **Add a rule…** and a rule's **Remove** among the VPC firewall rules (rules cost nothing; their logging, which
-  would, stays off). Asked twice: a rule opening SSH or every port to the whole internet (0.0.0.0/0 or ::/0), removing
-  the rule that lets SSH in to a server it reaches, and removing a rule that denies ingress to one.
-- **Add a key…** and a key's **Remove** among the project-wide SSH keys, safely (below).
-- **Dynamic DNS**: hosts of a public Cloud DNS zone kept at this network's public IPv4 address, each host's A record
-  set (one change, as above) only when it differs; **Update DNS now** sets them at once.
+  would, stays off). Asked twice: a rule denying SSH (it may lock you out), a rule letting anything but the web's ports
+  80 and 443 in from the whole internet (0.0.0.0/0 or ::/0: SSH, RDP, Docker's 2375, SSH moved to 2222, every port,
+  ping), removing the rule that lets SSH or RDP in to a server it reaches, and removing a rule that denies ingress to
+  one.
+- **Add a key…** and a key's **Remove** among the project-wide SSH keys, safely (below). The confirmation says what a
+  key gives: Google's guest agent adds the accounts it makes from metadata keys to `google-sudoers`, whose members get
+  sudo on the server.
+- **Dynamic DNS**: hosts of a public Cloud DNS zone kept at this network's public IPv4 address, only those that are its
+  own (below); **Update DNS now** sets them now, after its confirmation, and a host holding another address
+  offers **Take over…**.
+
+A second confirmation counts only when it is exactly true (the page sends JSON true): a program of its own sending
+"yes" or 1 is refused like a missing one.
 
 ### The SSH keys, with the metadata's fingerprint
 
@@ -107,9 +116,16 @@ memory alone.
 ## Dynamic DNS
 
 This network's public IPv4 address is asked of DNS (`myip.opendns.com` of OpenDNS's resolver, else Google's
-`o-o.myaddr.l.google.com`, each asked by its IPv4 address, as the hw-stats plugin asks it), each host's A record of
-Cloud DNS's API, and the record set changed only when they differ. Only hosts of the project's public zones are kept
-(a private zone answers inside its VPC networks alone); a host holding a CNAME is never written over.
+`o-o.myaddr.l.google.com`, each asked by its IPv4 address, as the hw-stats plugin asks it), and each host's A record of
+Cloud DNS's API, through the library's Keeper (liminal-libs 1.49.2). It changes only what is its own: a host with no A
+record (it is made), one already pointing at this network, one holding the address it set last (after the network's
+address changed, after a restart too: what is its own is kept in `googlecloud/ddns.json` under the platform's folder,
+`LIMINAL_PLATFORM_DIR`, else the data folder's `platform/`), and one you took over. Any other record, another address
+or several, is left as it is and said so, with **Take over…** on its row: confirmed, the host is pointed here on the
+next pass and kept there. Several addresses are never cut to one unasked. Just before a write the address is asked
+again, and the record read again: changed meanwhile to what is not its own, it is left as it is. Only hosts of the
+project's public zones are kept (a private zone answers inside its VPC networks alone); a host holding a CNAME is never
+written over; a host taken out of the settings is let go.
 
 ## Its API
 
@@ -147,6 +163,11 @@ paths (its tests check it), only the free changes above, and refuses any other c
 
 ## Valid, and the platform
 
+Its background reading starts only when the platform attaches it (the charts app run alone attaches every plugin it
+finds, and starts none of this). Detached (the platform ending, the plugin disabled), the reading ends: a request under
+way is the last thing it does, its settings are not read again (not from the process's environment either) and nothing
+more is written.
+
 The plugin is valid while a part of it works or has not been tried yet (Compute Engine, Cloud DNS): the platform
 disables a plugin that is not valid, which would stop Dynamic DNS, so a key that may read Cloud DNS alone keeps it
 working. A part that failed is taken as untried a quarter of an hour later (the platform attaches it again), or at
@@ -156,18 +177,19 @@ and where a key is made.
 ## Its hooks
 
 `present`, `status` (the summary, the facts, `tables`, `actions`, `forms`), `refresh()`, `servers()`, `firewalls()`,
-`domains()`, `records(zone)`, `ssh_keys()`; the changes `start_server(zone, instance)`, `stop_server(zone, instance)`,
+`domains()`, `records(zone)`, `ssh_keys()`; the changes `start_server(zone, instance, accept_costs=False)`,
+`stop_server(zone, instance)`,
 `reset_server(zone, instance, accept_hard_reset=False)`, `add_firewall_rule(name, network, direction, action, protocol,
 ports, ranges, target_tags, priority, description, accept_open_to_internet=False)`,
 `remove_firewall_rule(name, accept_risky_removal=False)`, `set_record(zone, name, rtype, data, ttl=None)`,
 `remove_record(zone, name, rtype, data)`, `add_ssh_key(user, key)`, `remove_ssh_key(user, fingerprint)`,
-`ddns_update(force=True)`. A refused change raises a refusal naming the argument that accepts it, when one does (the
-page asks it as a second confirmation).
+`ddns_update(force=True)`, `ddns_take_over(host, holds=None)`. A refused change raises a refusal naming the argument
+that accepts it, when one does (the page asks it as a second confirmation).
 
 ## From the command line
 
 Its settings read from the environment (as this shell has them); each change asks "yes" on the terminal first, a
-reset twice:
+start (naming the charges it resumes) and a reset twice:
 
 ```
 python -m plugin_platform_googlecloud status

@@ -10,7 +10,7 @@ import pytest
 
 from conftest import HOME, PROJECT, SSH_ED25519, FakeGoogle, err, settings_of, ssh_public
 from liminal_libs.machines.rest import RestError
-from plugin_platform_googlecloud import ACCEPT_OPEN, ACCEPT_REMOVE, ACCEPT_RESET
+from plugin_platform_googlecloud import ACCEPT_COSTS, ACCEPT_OPEN, ACCEPT_REMOVE, ACCEPT_RESET
 from plugin_platform_googlecloud.records import Refusal
 from plugin_platform_googlecloud.sshkeys import fingerprint_of
 
@@ -50,17 +50,21 @@ def ready(made, env):
 
 
 def test_each_form_is_its_hooks_arguments_in_order(ready):
-    p, fake, forms = ready()
+    p, fake, forms = ready(GOOGLECLOUD_DDNS_HOSTS="home.example.com")
+    assert {"ddns-take", "ddns-now"} <= set(forms)  # Dynamic DNS's: Take over… and the confirmed Update DNS now
     hooks = p.interface()["hooks"]
     for f in forms.values():
         assert f["hook"] in hooks, f["id"]
-        assert [x["name"] for x in f["fields"]] == list(inspect.signature(getattr(p, f["hook"])).parameters), f["id"]
+        params = inspect.signature(getattr(p, f["hook"])).parameters
+        names = [x["name"] for x in f["fields"]]
+        assert names == list(params)[:len(names)], f["id"]  # in order; the rest the hook's defaults
+        assert all(params[n].default is not inspect.Parameter.empty for n in list(params)[len(names):]), f["id"]
         assert all(x["type"] in ("text", "number", "choice", "fixed", "accept") for x in f["fields"])
         assert f["confirm"]["title"] and f["confirm"]["words"] and f["confirm"]["yes"]
         for x in f["fields"]:
             if x["type"] == "accept":
-                assert x["name"] in (ACCEPT_RESET, ACCEPT_OPEN, ACCEPT_REMOVE) and x["words"] and x["yes"]
-    assert fake.requests == []  # drawn: nothing asked
+                assert x["name"] in (ACCEPT_RESET, ACCEPT_COSTS, ACCEPT_OPEN, ACCEPT_REMOVE) and x["words"] and x["yes"]
+    assert [r for r in fake.requests if r["method"] != "GET"] == []  # drawn: nothing changed
 
 
 def test_stop_says_what_keeps_billing_and_sends_the_documented_request(ready):
@@ -89,16 +93,44 @@ def test_stopping_a_server_with_an_ephemeral_address_says_it_is_let_go(ready):
     assert "its ephemeral address 34.1.1.1 is let go: started again, it gets another (a DNS record holding it is then wrong)" in words
 
 
-def test_start_sends_the_documented_request_and_says_it_bills_again(ready):
-    p, fake, forms = ready()
+def test_a_start_resumes_charges_so_it_is_asked_twice_the_charge_named(ready):
+    fake = FakeGoogle()
+    fake.instances[("us-central1-a", "batch-1")]["guestAccelerators"] = [
+        {"acceleratorType": f"{C}/zones/us-central1-a/acceleratorTypes/nvidia-tesla-t4", "acceleratorCount": 2}]
+    p, fake, forms = ready(fake)
     f = forms["start:us-central1-a/batch-1"]
-    assert "bill again while it runs" in f["confirm"]["words"]
-    rep = p.ask(f["hook"], *page_args(f, {}))
+    words = f["confirm"]["words"]
+    assert words.startswith("batch-1 is started in us-central1-a: its vCPUs and memory (e2-standard-2: 2 vCPUs · 8 GB) "
+                            "bill again while it runs, and its GPUs (2 × nvidia-tesla-t4)")
+    assert "You are asked again before it is sent." in words and f["confirm"]["danger"] is True
+    (accept,) = [x for x in f["fields"] if x["type"] == "accept"]
+    assert accept["name"] == ACCEPT_COSTS and accept["words"] == "Started, batch-1 bills until it is stopped again: the charges named above."
+    with pytest.raises(Refusal, match=r"starting batch-1 resumes its charges: its vCPUs and memory \(e2-standard-2: 2 vCPUs "
+                                      r"· 8 GB\) bill again while it runs, and its GPUs \(2 × nvidia-tesla-t4\); its "
+                                      "disks and static addresses bill already") as refused:
+        p.ask(f["hook"], *page_args(f, {}))  # the first confirmation alone: nothing sent
+    assert refused.value.accept == ACCEPT_COSTS and fake.writes() == []
+    rep = p.ask(f["hook"], *page_args(f, {}, accepted={ACCEPT_COSTS}))
     assert fake.calls()[-1] == ("POST", f"{C}/zones/us-central1-a/instances/batch-1/start") and fake.requests[-1]["body"] is None
     assert rep["ok"] and "its vCPUs and memory bill again while it runs" in rep["lines"]
     with pytest.raises(Refusal, match="batch-1 is staging: only a stopped server is started"):
-        p.start_server("us-central1-a", "batch-1")  # read afresh: no longer stopped
+        p.start_server("us-central1-a", "batch-1", accept_costs=True)  # read afresh: no longer stopped
     assert [m for m, _ in fake.calls()].count("POST") == 1
+
+
+@pytest.mark.parametrize("given", ["false", "yes", "true", 1, "1", [True], None, False])
+def test_a_second_confirmation_counts_only_when_it_is_exactly_true(ready, given):
+    """A program of its own sending its values as text or numbers is refused like a missing confirmation."""
+    p, fake, forms = ready()
+    for hook, args, accept in (("reset_server", ("us-central1-a", "web-1"), ACCEPT_RESET),
+                               ("start_server", ("us-central1-a", "batch-1"), ACCEPT_COSTS),
+                               ("add_firewall_rule", ("open-rdp", "default", "INGRESS", "allow", "tcp", "3389", "0.0.0.0/0",
+                                                      None, None, None), ACCEPT_OPEN),
+                               ("remove_firewall_rule", ("default-allow-ssh",), ACCEPT_REMOVE)):
+        with pytest.raises(Refusal) as refused:
+            p.ask(hook, *args, given)
+        assert refused.value.accept == accept, hook
+    assert fake.writes() == []
 
 
 def test_a_reset_is_hard_so_it_is_asked_twice(ready):
@@ -154,30 +186,60 @@ def test_a_firewall_rule_is_added_with_the_documented_body(ready):
     assert fake.firewalls["deny-irc-out"]["denied"] == [{"IPProtocol": "tcp", "ports": ["6667"]}]
 
 
-def test_a_rule_opening_ssh_or_every_port_to_the_internet_is_asked_twice(ready):
+@pytest.mark.parametrize("values, words", [
+    ({"name": "open-ssh", "ports": "22", "ranges": "0.0.0.0/0"}, "it lets tcp:22 (SSH) in from the whole internet (0.0.0.0/0)"),
+    ({"name": "open-rdp", "ports": "3389", "ranges": "0.0.0.0/0"}, "it lets tcp:3389 (RDP) in from the whole internet"),
+    ({"name": "open-docker", "ports": "2375", "ranges": "0.0.0.0/0"}, "tcp:2375 (Docker's API, unauthenticated)"),
+    ({"name": "ssh-moved", "ports": "2222", "ranges": "0.0.0.0/0"}, "it lets tcp:2222 (SSH, moved) in from the whole internet"),
+    ({"name": "open-range", "ports": "80-443", "ranges": "0.0.0.0/0"}, "it lets tcp:80-443 in from the whole internet"),
+    ({"name": "open-all", "ports": "", "ranges": "203.0.113.0/24, ::/0", "target_tags": "http-server"},
+     "it lets every port of tcp (SSH and RDP among them) in from the whole internet (::/0) to tags http-server (web-1)"),
+    ({"name": "open-udp", "protocol": "udp", "ports": "", "ranges": "0.0.0.0/0"}, "it lets every port of udp in"),
+    ({"name": "ping", "protocol": "icmp", "ranges": "0.0.0.0/0"}, "it lets icmp in from the whole internet"),
+    ({"name": "deny-ssh", "action": "deny", "ports": "22", "ranges": "0.0.0.0/0", "priority": "0"},
+     "it denies tcp:22 (SSH) in from 0.0.0.0/0 to every server of default (batch-1, scratch-1, web-1): you may lock "
+     "yourself out of them (SSH)"),
+    ({"name": "deny-tcp", "action": "deny", "ports": "", "ranges": "203.0.113.7/32"},
+     "it denies every port of tcp (SSH and RDP among them) in from 203.0.113.7/32"),
+    ({"name": "deny-ssh-out", "direction": "EGRESS", "action": "deny", "ports": "22", "ranges": "0.0.0.0/0"},
+     "it denies tcp:22 (SSH) out of every server of default"),
+])
+def test_a_risky_rule_is_asked_twice(ready, values, words):
+    """A deny that takes SSH (a lockout), and an allow letting anything in from the whole internet but the web's ports
+    80 and 443, are refused first, naming what they do, and added once that is accepted."""
     p, fake, forms = ready()
     f = forms["firewall:add"]
-    for values, opened in (({"name": "open-ssh", "ports": "22", "ranges": "0.0.0.0/0"}, "SSH (tcp:22)"),
-                           ({"name": "open-all", "ports": "", "ranges": "203.0.113.0/24, ::/0", "target_tags": "web"},
-                            "every port of tcp"),
-                           ({"name": "open-udp", "protocol": "udp", "ports": "", "ranges": "0.0.0.0/0"}, "every port of udp")):
-        with pytest.raises(Refusal, match=f"it opens {re.escape(opened)}.* to the whole internet") as refused:
-            p.ask(f["hook"], *page_args(f, values))
-        assert refused.value.accept == ACCEPT_OPEN
-    assert [m for m, _ in fake.calls()] == ["GET", "GET", "GET"]  # each read the rules: nothing added
-    rep = p.ask(f["hook"], *page_args(f, {"name": "open-ssh", "ports": "22", "ranges": "0.0.0.0/0"}, accepted={ACCEPT_OPEN}))
-    assert rep["ok"] and fake.firewalls["open-ssh"]["sourceRanges"] == ["0.0.0.0/0"]
-    p.ask(f["hook"], *page_args(f, {"name": "ping", "protocol": "icmp", "ranges": "0.0.0.0/0"}))  # ping: not risky
-    assert fake.firewalls["ping"]["allowed"] == [{"IPProtocol": "icmp"}]
+    with pytest.raises(Refusal, match=re.escape(words)) as refused:
+        p.ask(f["hook"], *page_args(f, values))
+    assert refused.value.accept == ACCEPT_OPEN and fake.writes() == []
+    rep = p.ask(f["hook"], *page_args(f, values, accepted={ACCEPT_OPEN}))
+    assert rep["ok"] and values["name"] in fake.firewalls
 
 
-def test_removing_the_rule_letting_ssh_in_is_asked_twice(ready):
+def test_the_webs_ports_from_the_internet_and_ssh_from_one_address_are_asked_once(ready):
     p, fake, forms = ready()
+    f = forms["firewall:add"]
+    for values in ({"name": "web", "ports": "80, 443", "ranges": "0.0.0.0/0"},
+                   {"name": "quic", "protocol": "udp", "ports": "443", "ranges": "0.0.0.0/0, ::/0"},
+                   {"name": "home-ssh", "ports": "22", "ranges": f"{HOME}/32"},
+                   {"name": "deny-smtp-in", "action": "deny", "ports": "25", "ranges": "0.0.0.0/0"}):
+        assert p.ask(f["hook"], *page_args(f, values))["ok"], values["name"]
+    assert {"web", "quic", "home-ssh", "deny-smtp-in"} <= set(fake.firewalls)
+
+
+def test_removing_the_rule_letting_ssh_or_rdp_in_is_asked_twice(ready):
+    fake = FakeGoogle()
+    fake.firewalls["allow-rdp"] = {"name": "allow-rdp", "network": fake.firewalls["allow-http"]["network"],
+                                   "direction": "INGRESS", "priority": 1000, "sourceRanges": ["203.0.113.0/24"],
+                                   "targetTags": ["http-server"], "allowed": [{"IPProtocol": "tcp", "ports": ["3389"]}]}
+    p, fake, forms = ready(fake)
     f = forms["firewall:remove"]
-    with pytest.raises(Refusal, match="default-allow-ssh lets SSH .* in to batch-1, scratch-1, web-1: removing it may lock "
-                                      "you out of them") as refused:
+    with pytest.raises(Refusal, match=r"default-allow-ssh lets SSH \(tcp:22\) in to batch-1, scratch-1, web-1: removing it "
+                                      "may lock you out of them") as refused:
         p.ask(f["hook"], *page_args(f, {"name": "default-allow-ssh"}))
     assert refused.value.accept == ACCEPT_REMOVE and "default-allow-ssh" in fake.firewalls and fake.writes() == []
+    with pytest.raises(Refusal, match=r"allow-rdp lets RDP \(tcp:3389\) in to web-1: removing it may lock you out of it"):
+        p.ask(f["hook"], *page_args(f, {"name": "allow-rdp"}))
     rep = p.ask(f["hook"], *page_args(f, {"name": "default-allow-ssh"}, accepted={ACCEPT_REMOVE}))
     assert ("DELETE", f"{C}/global/firewalls/default-allow-ssh") in fake.calls() and rep["ok"]
     assert fake.requests[[r["method"] for r in fake.requests].index("DELETE")]["body"] is None

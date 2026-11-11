@@ -450,15 +450,28 @@ def settings_of(**more) -> dict[str, str]:
 
 
 @pytest.fixture(autouse=True)
-def _no_google_no_network(monkeypatch):
+def _no_google_no_network(monkeypatch, tmp_path):
     """No test reaches Google, a resolver or this machine's settings: HTTPS and nslookup refused, every GOOGLECLOUD_
-    variable cleared."""
+    variable cleared, the platform's folder (Dynamic DNS's state) the test's own."""
     def refused(*a, **k):
         raise AssertionError("a test reached for the network")
     monkeypatch.setattr(rest_mod, "_requests_transport", refused)
     monkeypatch.setattr(dns_mod, "query", refused)
     for n in NAMES:
         monkeypatch.delenv(n, raising=False)
+    monkeypatch.setenv("LIMINAL_PLATFORM_DIR", str(tmp_path / "platform"))
+
+
+class Platform:
+    """The platform app as a plugin sees it attaching it (App.NAME): the one app whose attaching starts its reading."""
+
+    NAME = "platform"
+
+
+class Charts:
+    """The charts app run alone, which attaches every plugin it finds."""
+
+    NAME = "charts"
 
 
 @pytest.fixture
@@ -472,11 +485,16 @@ def env(monkeypatch):
 
 @pytest.fixture
 def made():
-    """A plugin over the stand-ins: (plugin, fake Google). Its sleeps are kept, never slept."""
+    """A plugin over the stand-ins: (plugin, fake Google). Its sleeps are kept, never slept; this network's address is
+    `public` (a list of answers: each asked in turn, the last one kept)."""
     def make(fake: FakeGoogle | None = None, public=(HOME, "a stand-in")):
         fake = fake or FakeGoogle()
         slept: list[float] = []
-        p = GoogleCloudPlugin(transport=fake, public=(lambda: public), sleep=slept.append)
-        p.slept = slept
+        answers = list(public) if isinstance(public, list) else [public]
+
+        def ask():
+            return answers.pop(0) if len(answers) > 1 else answers[0]
+        p = GoogleCloudPlugin(transport=fake, public=ask, sleep=slept.append)
+        p.slept, p.answers = slept, answers
         return p, fake
     return make

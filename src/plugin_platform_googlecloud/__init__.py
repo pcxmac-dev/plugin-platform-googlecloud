@@ -3,29 +3,39 @@ clouds, "Free changes only"): a project through Google's own APIs. It shows ever
 servers of every zone with their state, machine type and addresses, the disks, the addresses, the VPC firewall rules
 and the servers each reaches, the Cloud DNS zones and their records, the project-wide SSH keys, the regions in use and
 their quotas, and a count of every other kind the project holds) and changes only what costs nothing, each change
-confirmed first: a server started, stopped or reset (hard: asked twice), a record set or removed (every other record
-kept), a firewall rule added or removed (a risky one asked twice), a project-wide SSH key added or removed (with the
-metadata's fingerprint), and Dynamic DNS keeping hosts of a public zone at this network's address. Nothing that starts
-a charge but a server's start (its vCPUs and memory bill again while it runs: said before it is asked): no new server,
-disk, snapshot, image or reserved address, no resize, nothing deleted but a firewall rule. A stopped server still
-bills: its disks and static addresses keep billing while they exist (said on the page).
+confirmed first: a server stopped, or reset (hard: asked twice), a record set or removed (every other record kept), a
+firewall rule added or removed (a risky one asked twice), a project-wide SSH key added or removed (with the metadata's
+fingerprint), and Dynamic DNS keeping hosts of a public zone at this network's address, only those that are its own
+(made by it, pointing here already, or taken over once the user confirmed it). The one change that starts a charge is
+a server's start (its vCPUs and memory, and any GPU, bill again while it runs): asked twice, the charge named. No new
+server, disk, snapshot, image or reserved address, no resize, nothing deleted but a firewall rule. A stopped server
+still bills: its disks and static addresses keep billing while they exist (said on the page).
 
 Its settings are pairs asked of the login of the app it is attached to (settings.py: GOOGLECLOUD_KEY, the service
 account's JSON key itself; GOOGLECLOUD_PROJECT; GOOGLECLOUD_DDNS_HOSTS and GOOGLECLOUD_DDNS_MINUTES), never a file of its
-own. While attached to the platform app it reads the project every quarter of an hour and checks the Dynamic DNS hosts
-every few minutes in a thread of its own; detached, nothing of it runs. Its status is what was read last (no request is
-made to answer it): the platform's page draws its tables, its actions (Refresh, Update DNS now) and its forms.
+own. Attached to the platform app (and only to it: the charts app run alone attaches every plugin it finds) it reads
+the project every quarter of an hour and checks the Dynamic DNS hosts every few minutes in a thread of its own, with
+the settings of the platform's login; detached, that thread ends before its next write and reads nothing more. Its
+status is what was read last (no request is made to answer it): the platform's page draws its tables, its actions
+(Refresh, Update DNS now) and its forms.
+
+An audit before any key went in (2026-11-11) asked: Start asked twice; a firewall rule denying SSH, or letting anything
+but the web's 80 and 443 in from the whole internet, asked twice; Dynamic DNS through the library's Keeper (a host
+holding another address left as it is until taken over); a pass ending once the plugin is detached; a second
+confirmation counted only when it is exactly true.
 
     python -m plugin_platform_googlecloud status | servers | domains | records ZONE | ddns [--now] | firewalls | keys
         | power NAME on|off|reboot | set ZONE NAME TYPE DATA [--ttl N] | remove ZONE NAME TYPE DATA
 """
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from liminal_libs.machines.ddns import Host, Keeper, hosts_of
 from liminal_libs.machines.plugin import MachinePlugin
@@ -41,7 +51,7 @@ from .card import APIS, BILLING_NAME, COMPUTE_NAME, DNS_NAME, OAUTH_NAME
 from .records import Refusal
 from .settings import CONSOLE_KEYS, DDNS_HOSTS, KEY, KEYS, NAMES, Config
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 REFRESH_S = 900.0  # the project read again at most this often while attached (or by Refresh)
 CONFIG_S = 30.0  # the settings asked of the login again after this long
 RETRY_S = 900.0  # a part that failed is taken as untried after this long while detached: attached again, it is tried again
@@ -49,10 +59,14 @@ SOON_S = (45.0, 150.0)  # after a power change, the project read again this long
 HOURLY_S = 3600.0  # the zones and the billing account read at most this often
 ZONES_MAX = 12  # the Cloud DNS zones whose records a refresh reads (the rest: `records ZONE`)
 MACHINE_TYPES_MAX = 24  # machine types read by one refresh (each read once; the rest the next time)
+JOIN_S = 10.0  # detached, the background thread waited for this long; one still in a request ends before its next write
+PLATFORM = "platform"  # the one app whose attaching starts the background reading (App.NAME)
+DIR_VAR = "LIMINAL_PLATFORM_DIR"  # the platform's own folder (its app's variable): Dynamic DNS's state goes under it
 # this network's public IPv4 address, asked of DNS (as the hw-stats plugin asks it): the name servers are named here
 PUBLIC_IPV4 = (("myip.opendns.com", "a", "208.67.222.222", "OpenDNS"),
                ("o-o.myaddr.l.google.com", "txt", "216.239.32.10", "Google"))
 ACCEPT_RESET = "accept_hard_reset"  # the hooks' arguments a second, explicit confirmation sets (a Refusal's accept)
+ACCEPT_COSTS = "accept_costs"
 ACCEPT_OPEN = "accept_open_to_internet"
 ACCEPT_REMOVE = "accept_risky_removal"
 ROLES = ("Compute Viewer (roles/compute.viewer) and DNS Reader (roles/dns.reader) for the reads, and for the free "
@@ -66,6 +80,27 @@ STATES = {"RUNNING": "running", "TERMINATED": "stopped", "STOPPING": "stopping",
           "REPAIRING": "repairing"}
 CUSTOM = re.compile(r"(?:^|-)custom-(\d+)-(\d+)(?:-ext)?$")  # a custom machine type: its vCPUs and memory in its name
 READ_ERRORS = (RestError, ValueError, TypeError, KeyError, AttributeError)  # a read's trouble, said in words
+
+
+def accepted(value) -> bool:
+    """A second confirmation counts only when it is exactly true (the page sends JSON true): "false", "yes" or 1 from
+    a program of its own is refused like a missing one."""
+    return value is True
+
+
+def state_dir() -> Path:
+    """Where the plugin keeps what Dynamic DNS holds as its own: the platform's folder's googlecloud/ (LIMINAL_PLATFORM_DIR,
+    else the data folder's platform/)."""
+    named = (os.environ.get(DIR_VAR) or "").strip()
+    if named:
+        return Path(named).expanduser() / "googlecloud"
+    from liminal_libs import layout
+
+    return layout.data_dir() / "platform" / "googlecloud"
+
+
+class Detached(RuntimeError):
+    """The plugin was detached while its background pass ran: nothing more is read or written."""
 
 
 def when(t: float | None) -> str:
@@ -119,6 +154,7 @@ class _Runtime:
     def __init__(self):
         self.lock = threading.Lock()
         self.config: tuple[float, Config] | None = None
+        self.entered = 0  # settings entered on the page so far (settings_changed): the background reads them anew too
         self.client: tuple[str, Tokens, GoogleCloud] | None = None
         self.keeper: Keeper | None = None
         self.project: dict | None = None
@@ -141,8 +177,13 @@ class _Runtime:
         self.refreshed_at: float | None = None
         self.parts = {"compute": Outcome(), "dns": Outcome()}
         self.ddns_print = ""
+        self.ddns_seen: set[str] = set()  # the Dynamic DNS hosts of the settings as last seen (one taken out: let go)
+        self.passing = threading.Lock()  # one Dynamic DNS pass at a time, with its settings and stop below
+        self.pass_cfg: Config | None = None
+        self.pass_stop: threading.Event | None = None
         self.worker: threading.Thread | None = None
         self.stop: threading.Event | None = None
+        self.lingering: list[threading.Thread] = []  # a detached thread still ending a request (it writes nothing more)
         self.wake = threading.Event()
         self.refreshing = threading.Lock()
         self.soon: list[float] = []  # monotonic times the project is read again (after a power change)
@@ -163,7 +204,7 @@ class GoogleCloudPlugin(MachinePlugin):
     ICON = "googlecloud"  # Google Cloud's mark (liminal-libs 1.49.0's icons.js)
     HOOKS = (*MachinePlugin.HOOKS, "refresh", "servers", "start_server", "stop_server", "reset_server", "firewalls",
              "add_firewall_rule", "remove_firewall_rule", "domains", "records", "set_record", "remove_record",
-             "ssh_keys", "add_ssh_key", "remove_ssh_key", "ddns_update")
+             "ssh_keys", "add_ssh_key", "remove_ssh_key", "ddns_update", "ddns_take_over")
     keys = KEYS
     signup = CONSOLE_KEYS
     limits = ("Compute Engine: rate quotas per project and minute (its Quotas page), 36 project metadata writes a "
@@ -171,11 +212,12 @@ class GoogleCloudPlugin(MachinePlugin):
               "minute; the plugin: about a dozen reads every quarter of an hour, a token an hour")
     apis = APIS
 
-    def __init__(self, transport=None, public=None, clock=None, sleep=None):
+    def __init__(self, transport=None, public=None, clock=None, sleep=None, folder: Path | None = None):
         self._transport = transport  # (method, url, headers, body, timeout) -> (status, headers, body): a test's
         self._public = public  # () -> (this network's IPv4 address, whose): a test's; else DNS (PUBLIC_IPV4)
         self._clock = clock or time.time
         self._sleep = sleep or time.sleep
+        self._folder = Path(folder) if folder is not None else None  # Dynamic DNS's state: a test's; else state_dir()
         self._rt = _Runtime()
 
     # -- the settings, the client, the keeper ----------------------------------------------------------------------------
@@ -192,14 +234,17 @@ class GoogleCloudPlugin(MachinePlugin):
         return cfg
 
     def settings_changed(self) -> None:
-        """Its settings were just entered (the platform's Settings…, kept through the login): read anew at once."""
+        """Its settings were just entered (the platform's Settings…, kept through the login): read anew at once, by the
+        background too."""
         with self._rt.lock:
             self._rt.config = None
+            self._rt.entered += 1
+        self._rt.wake.set()
 
-    def client(self) -> GoogleCloud:
-        """The APIs with the settings as they are (ValueError when they are not set). A new key or project: what was
-        read of the old one is let go."""
-        cfg = self.config()
+    def client(self, cfg: Config | None = None) -> GoogleCloud:
+        """The APIs with the settings as they are (`cfg`: as the background read them; else asked now), ValueError when
+        they are not set. A new key or project: what was read of the old one is let go."""
+        cfg = cfg if cfg is not None else self.config()
         if not cfg.ready:
             raise ValueError(self._not_ready(cfg))
         with self._rt.lock:
@@ -225,11 +270,16 @@ class GoogleCloudPlugin(MachinePlugin):
             return NOT_SET
         return "; ".join(cfg.problems) or NOT_SET
 
+    @property
+    def state_file(self) -> Path:
+        """Dynamic DNS's own: the addresses it set or found pointing here, and the hosts it was let take over."""
+        return (self._folder if self._folder is not None else state_dir()) / "ddns.json"
+
     def keeper(self) -> Keeper:
         with self._rt.lock:
             if self._rt.keeper is None:
                 self._rt.keeper = Keeper(read=self._ddns_read, write=self._ddns_write, servers=PUBLIC_IPV4,
-                                         public=self._public, clock=self._clock)
+                                         public=self._public, clock=self._clock, state=self.state_file)
             return self._rt.keeper
 
     # -- the hooks: reads --------------------------------------------------------------------------------------------------
@@ -249,17 +299,24 @@ class GoogleCloudPlugin(MachinePlugin):
         finally:
             self._rt.refreshing.release()
 
-    def _refresh(self, cfg: Config) -> dict:
+    def _refresh(self, cfg: Config, stop: threading.Event | None = None) -> dict:
+        """The project read with `cfg` (the background's `stop` set: it ends at the next part, keeping nothing more)."""
         now = self._clock()
-        api = self.client()
+        api = self.client(cfg)
         troubles: dict[str, str] = {}
         try:
-            self._read_compute(api, now)
+            self._read_compute(api, now, stop)
+        except Detached:
+            return {"servers": 0, "zones": 0, "readAt": when(now), "troubles": ["detached"]}
         except READ_ERRORS as e:
             troubles["compute"] = _words(e)
+        if stop is not None and stop.is_set():
+            return {"servers": 0, "zones": 0, "readAt": when(now), "troubles": ["detached"]}
         self._read_billing(api, now)
         try:
-            self._read_dns(api)
+            self._read_dns(api, stop)
+        except Detached:
+            return {"servers": 0, "zones": 0, "readAt": when(now), "troubles": ["detached"]}
         except READ_ERRORS as e:
             troubles["dns"] = _words(e)
         with self._rt.lock:
@@ -275,13 +332,19 @@ class GoogleCloudPlugin(MachinePlugin):
         return {"servers": servers, "zones": zones, "readAt": when(now),
                 "troubles": [f"{'Compute Engine' if p == 'compute' else 'Cloud DNS'}: {t}" for p, t in troubles.items()]}
 
-    def _read_compute(self, api: GoogleCloud, now: float) -> None:
+    @staticmethod
+    def _going_on(stop: threading.Event | None) -> None:
+        if stop is not None and stop.is_set():
+            raise Detached("the plugin was detached: nothing more is read or written")
+
+    def _read_compute(self, api: GoogleCloud, now: float, stop: threading.Event | None = None) -> None:
         project = api.project_info()
         instances, notes = api.instances()
         disks, more = api.disks()
         notes += more
         addresses, more = api.addresses()
         notes += more
+        self._going_on(stop)
         firewalls = api.firewalls()
         regions = api.regions()
         with self._rt.lock:
@@ -299,11 +362,13 @@ class GoogleCloudPlugin(MachinePlugin):
                 continue
             if asked >= MACHINE_TYPES_MAX:
                 continue
+            self._going_on(stop)
             asked += 1
             try:
                 types[key] = api.machine_type(*key)
             except RestError:
                 types[key] = {}  # its name alone shown; not asked again until the plugin starts again
+        self._going_on(stop)
         with self._rt.lock:
             rt = self._rt
             rt.project, rt.instances, rt.disks, rt.addresses, rt.firewalls = project, instances, disks, addresses, firewalls
@@ -327,10 +392,11 @@ class GoogleCloudPlugin(MachinePlugin):
             with self._rt.lock:
                 self._rt.account, self._rt.account_error, self._rt.account_at = account, why, now
 
-    def _read_dns(self, api: GoogleCloud) -> None:
+    def _read_dns(self, api: GoogleCloud, stop: threading.Event | None = None) -> None:
         zones = api.managed_zones()
         found: dict[str, list[dict] | str] = {}
         for z in zones[:ZONES_MAX]:
+            self._going_on(stop)
             try:
                 found[str(z.get("name"))] = api.rrsets(str(z.get("name")))
             except READ_ERRORS as e:
@@ -338,6 +404,7 @@ class GoogleCloudPlugin(MachinePlugin):
         for z in zones[ZONES_MAX:]:
             found[str(z.get("name"))] = (f"not read with the rest (more than {ZONES_MAX} zones): "
                                          f"python -m plugin_platform_googlecloud records {z.get('name')}")
+        self._going_on(stop)
         with self._rt.lock:
             self._rt.dns_zones, self._rt.records = zones, found
 
@@ -388,11 +455,17 @@ class GoogleCloudPlugin(MachinePlugin):
         return [e.describe() for e in sshkeys.entries(_items(project))]
 
     # -- the hooks: the free changes --------------------------------------------------------------------------------------
-    def start_server(self, zone: str, instance: str) -> dict:
-        """A stopped server started (its vCPUs and memory bill again while it runs)."""
+    def start_server(self, zone: str, instance: str, accept_costs=False) -> dict:
+        """A stopped server started: its vCPUs and memory (and any GPU) bill again while it runs, so it is started only
+        once that is accepted (asked twice), the charge named."""
         api, inst = self._fresh(zone, instance)
         if inst.get("status") not in ("TERMINATED",):
             raise Refusal(f"{instance} is {STATES.get(str(inst.get('status')), inst.get('status'))}: only a stopped server is started")
+        if not accepted(accept_costs):
+            with self._rt.lock:
+                types = dict(self._rt.machine_types)
+            raise Refusal(f"starting {instance} resumes its charges: {_start_charges(inst, types)}; its disks and "
+                          "static addresses bill already. Started only once that is accepted", accept=ACCEPT_COSTS)
         op = api.start(zone, instance)
         self._soon()
         return {"said": f"asked Google to start {instance}", "ok": True, "operation": op.get("name"),
@@ -420,7 +493,7 @@ class GoogleCloudPlugin(MachinePlugin):
         api, inst = self._fresh(zone, instance)
         if inst.get("status") != "RUNNING":
             raise Refusal(f"{instance} is {STATES.get(str(inst.get('status')), inst.get('status'))}: only a running server is reset")
-        if not accept_hard_reset:
+        if not accepted(accept_hard_reset):
             raise Refusal(f"a reset of {instance} is hard: Compute Engine restarts it at once without an ACPI shutdown "
                           "signal, so unsaved data is lost and its disks' file systems may be corrupted (it stays "
                           "running, and billing, throughout); done only once that is accepted", accept=ACCEPT_RESET)
@@ -433,8 +506,8 @@ class GoogleCloudPlugin(MachinePlugin):
     def add_firewall_rule(self, name: str, network: str = "default", direction: str = "INGRESS", action: str = "allow",
                           protocol: str = "tcp", ports=None, ranges=None, target_tags=None, priority=None,
                           description=None, accept_open_to_internet=False) -> dict:
-        """A VPC firewall rule added (free; its logging left off); one opening SSH or every port to the whole internet
-        only once that is accepted (asked twice)."""
+        """A VPC firewall rule added (free; its logging left off); one letting anything but the web's ports 80 and 443
+        in from the whole internet, or denying SSH, only once that is accepted (asked twice)."""
         body = fw.build(name, network, direction, action, protocol, ports, ranges, target_tags, priority, description)
         api = self.client()
         rules = api.firewalls()
@@ -443,8 +516,8 @@ class GoogleCloudPlugin(MachinePlugin):
         with self._rt.lock:
             self._rt.firewalls = rules
             instances = list(self._rt.instances)
-        risky = fw.risky_addition(body)
-        if risky and not accept_open_to_internet:
+        risky = fw.risky_addition(body, instances)
+        if risky and not accepted(accept_open_to_internet):
             raise Refusal(f"{risky}: added only once that is accepted", accept=ACCEPT_OPEN)
         done = api.wait_global(api.add_firewall(body))
         self._reread_rules(api)
@@ -454,8 +527,8 @@ class GoogleCloudPlugin(MachinePlugin):
                           "VPC firewall rules cost nothing (its logging is off)"]}
 
     def remove_firewall_rule(self, name: str, accept_risky_removal=False) -> dict:
-        """A VPC firewall rule removed; the one letting SSH in to a server it reaches (or denying ingress to one) only
-        once that is accepted (asked twice)."""
+        """A VPC firewall rule removed; the one letting SSH or RDP in to a server it reaches (or denying ingress to one)
+        only once that is accepted (asked twice)."""
         n = str(name or "").strip()
         api = self.client()
         rules = api.firewalls()
@@ -466,7 +539,7 @@ class GoogleCloudPlugin(MachinePlugin):
         if rule is None:
             raise Refusal(f"no firewall rule named {n!r} in the project")
         risky = fw.risky_removal(rule, instances)
-        if risky and not accept_risky_removal:
+        if risky and not accepted(accept_risky_removal):
             raise Refusal(f"{risky}; removed only once that is accepted", accept=ACCEPT_REMOVE)
         done = api.wait_global(api.remove_firewall(n))
         self._reread_rules(api)
@@ -497,6 +570,10 @@ class GoogleCloudPlugin(MachinePlugin):
         try:
             change = api.change(str(z["name"]), additions, deletions)
         except RestError as e:
+            if e.status == 0 or e.status >= 500:  # no answer, or Google's own trouble: it may have been made
+                raise RestError(f"the change ({words}) was sent but no answer said whether it was made: {e}. Refresh "
+                                "shows the zone as it is; sending it again is safe (a deletion that no longer matches "
+                                "is refused)", e.status, e.code, e.request_id) from None
             raise RestError(f"the change ({words}) was refused, nothing changed: {e}", e.status, e.code, e.request_id) from None
         try:
             sets = api.rrsets(str(z["name"]))
@@ -555,20 +632,64 @@ class GoogleCloudPlugin(MachinePlugin):
             lines.append("OS Login is on for the project: its servers ignore these keys")
         return {"said": words, "ok": ok and kept, "changed": True, "lines": lines}
 
-    def ddns_update(self, force: bool = True) -> list[dict]:
-        """A Dynamic DNS pass now (the page's Update DNS now: `force`, each host's record set whether it differs or not;
-        the command line's `ddns` without --now sets only those that differ)."""
+    def ddns_update(self, force: bool = True) -> dict:
+        """A Dynamic DNS pass now (the page's Update DNS now, once confirmed: `force`, each host that is its own set
+        whether it differs or not; the command line's `ddns` without --now sets only those that differ). A host holding
+        another address is left as it is (Take over… on the page)."""
         cfg = self.config(fresh=True)
         if not cfg.ddns_ready:
             raise ValueError(f"Dynamic DNS is not set up: {DDNS_HOSTS} is not set" if cfg.ready else self._not_ready(cfg))
-        return self._ddns_pass(cfg, force=bool(force))
+        hosts = self._ddns_pass(cfg, force=bool(force))
+        left = [h for h in hosts if h.get("foreign")]
+        return {"said": f"Dynamic DNS: {plural(len(hosts), 'host')} checked" + (f", {len(left)} left as it is" if left else ""),
+                "ok": all(h.get("ok") is not False or h.get("foreign") for h in hosts), "hosts": hosts,
+                "lines": [f"{h['host']}: {h['result']}" for h in hosts]}
 
-    def _ddns_pass(self, cfg: Config, force: bool, wait: float = 120.0) -> list[dict]:
+    def ddns_take_over(self, host: str, holds=None) -> dict:
+        """A Dynamic DNS host the user let the keeper take over (the page's Take over…, once confirmed: `holds`, what the
+        record held as the page showed it), then a pass for it: its A record pointed at this network's address."""
+        cfg = self.config(fresh=True)
+        if not cfg.ddns_ready:
+            raise ValueError(f"Dynamic DNS is not set up: {DDNS_HOSTS} is not set" if cfg.ready else self._not_ready(cfg))
+        want = str(host or "").strip().rstrip(".").lower()
         hosts, _ = self._hosts(cfg, read=True)
-        out = self.keeper().run_pass(hosts, force=force, wait=wait)
+        found = next((h for h in hosts if h.fqdn == want), None)
+        if found is None:
+            raise Refusal(f"{want or '(no host)'} is none of the Dynamic DNS hosts set ({DDNS_HOSTS}) in a public zone")
+        self.keeper().take_over(found.fqdn)
+        states = self._ddns_pass(cfg, force=False, only=found.fqdn)
+        state = states[0] if states else {"host": found.fqdn, "ok": None, "result": "not checked yet"}
+        lines = ([f"it held {holds}"] if holds else []) + ["kept at this network's address from now on"]
+        return {"said": f"{found.fqdn} taken over: {state['result']}", "ok": state.get("ok") is not False,
+                "host": state, "lines": lines}
+
+    def _ddns_pass(self, cfg: Config, force: bool, wait: float = 120.0, stop: threading.Event | None = None,
+                   only: str | None = None) -> list[dict]:
+        """A pass over the hosts of `cfg` (`only`: that one) with `cfg`'s client; `stop` (the background's) set ends it
+        before its next write. A host taken out of the settings is let go first."""
+        if not self._rt.passing.acquire(timeout=max(0.0, wait)):
+            raise RuntimeError("a Dynamic DNS pass is under way")
+        try:
+            self._rt.pass_cfg, self._rt.pass_stop = cfg, stop
+            self._let_go(cfg)
+            hosts, _ = self._hosts(cfg, read=True)
+            if only is not None:
+                hosts = [h for h in hosts if h.fqdn == only]
+            out = self.keeper().run_pass(hosts, force=force, wait=wait, stop=stop)
+            with self._rt.lock:
+                self._rt.ddns_print = cfg.ddns_print
+            return out
+        finally:
+            self._rt.pass_cfg, self._rt.pass_stop = None, None
+            self._rt.passing.release()
+
+    def _let_go(self, cfg: Config) -> None:
+        """The hosts taken out of the settings since they were last seen: no longer the keeper's own."""
+        now = {_fqdn(x) for x in re.split(r"[,;\s]+", cfg.hosts) if x.strip()}
         with self._rt.lock:
-            self._rt.ddns_print = cfg.ddns_print
-        return out
+            gone, self._rt.ddns_seen = self._rt.ddns_seen - now, now
+        for fqdn in sorted(gone):
+            self.keeper().let_go(fqdn)
 
     # -- Dynamic DNS through Cloud DNS ------------------------------------------------------------------------------------
     def _public_zones(self) -> list[dict]:
@@ -583,7 +704,7 @@ class GoogleCloudPlugin(MachinePlugin):
             known = self._rt.dns_zones is not None
         if read and not known:
             try:
-                zones = self.client().managed_zones()
+                zones = self.client(cfg).managed_zones()
                 with self._rt.lock:
                     self._rt.dns_zones = zones
             except READ_ERRORS:
@@ -598,21 +719,35 @@ class GoogleCloudPlugin(MachinePlugin):
                 return z
         raise Refusal(f"{host.fqdn} is in no public Cloud DNS zone of the project")
 
+    def _pass_client(self) -> GoogleCloud:
+        """The client of the pass under way, with its settings (never read anew from a login once it began)."""
+        self._going_on(self._rt.pass_stop)
+        return self.client(self._rt.pass_cfg)
+
     def _ddns_read(self, host: Host) -> list[str]:
         z = self._zone_of(host)
         full = rec.dot(host.fqdn)
-        for s in self.client().rrsets(str(z["name"]), name=full, rtype="A"):
+        for s in self._pass_client().rrsets(str(z["name"]), name=full, rtype="A"):
             if str(s.get("type")) == "A" and rec.dot(s.get("name")) == full:
                 return [str(v) for v in s.get("rrdatas") or []]
         return []
 
     def _ddns_write(self, host: Host, ip: str) -> str:
+        """The host's A record set to `ip` alone: read afresh, and left as it is if it changed meanwhile to what is not
+        the keeper's own (another address, or several); one change, its old record set deleted exactly as read."""
         z = self._zone_of(host)
-        api = self.client()
+        api = self._pass_client()
         full = rec.dot(host.fqdn)
-        additions, deletions, _ = rec.plan_set(z, full, "A", ip, None, api.rrsets(str(z["name"]), name=full))
+        at_name = api.rrsets(str(z["name"]), name=full)
+        held = next(([str(v) for v in s.get("rrdatas") or []] for s in at_name
+                     if str(s.get("type")) == "A" and rec.dot(s.get("name")) == full), [])
+        keeper = self.keeper()
+        if held and held != [ip] and not keeper.taken(host.fqdn) and held != [keeper.own(host.fqdn)]:
+            raise Refusal(f"it changed meanwhile to {', '.join(held)}: left as it is")
+        additions, deletions, _ = rec.plan_set(z, full, "A", ip, None, at_name)
         if not additions:
             return "current"
+        self._going_on(self._rt.pass_stop)
         api.change(str(z["name"]), additions, deletions)
         return "set" if deletions else "made"
 
@@ -679,16 +814,19 @@ class GoogleCloudPlugin(MachinePlugin):
 
     # -- attached: the reading in the background --------------------------------------------------------------------------
     def attach(self, app, login=None) -> dict:
-        """Attached by the platform: its settings asked of the platform's login from now on; the project read and the
-        Dynamic DNS hosts checked in the background."""
+        """Attached: its settings asked of the app's login from now on. Attached by the platform (and by no other app:
+        the charts app run alone attaches every plugin it finds), the project is read and the Dynamic DNS hosts checked
+        in the background."""
         interface = super().attach(app, login)
         with self._rt.lock:
             self._rt.config = None
-        self._start()
+        if getattr(app, "NAME", "") == PLATFORM:
+            self._start(login)
         return interface
 
     def detach(self) -> None:
-        """Detached (the platform ending, the plugin disabled or not valid): the background reading ends."""
+        """Detached (the platform ending, the plugin disabled or not valid): the background reading ends, a request
+        under way the last thing it does (nothing more read, nothing written)."""
         self._stop()
         super().detach()
         with self._rt.lock:
@@ -696,16 +834,18 @@ class GoogleCloudPlugin(MachinePlugin):
 
     @property
     def working(self) -> bool:
+        """Whether a background thread of its own is alive (one detached but still ending a request too)."""
         with self._rt.lock:
-            t = self._rt.worker
-        return t is not None and t.is_alive()
+            threads = [t for t in (self._rt.worker, *self._rt.lingering) if t is not None]
+            self._rt.lingering = [t for t in self._rt.lingering if t.is_alive()]
+        return any(t.is_alive() for t in threads)
 
-    def _start(self) -> None:
+    def _start(self, login) -> None:
         with self._rt.lock:
             if self._rt.worker is not None and self._rt.worker.is_alive():
                 return
             stop = threading.Event()
-            t = threading.Thread(target=self._work, args=(stop,), name="googlecloud", daemon=True)
+            t = threading.Thread(target=self._work, args=(stop, login), name="googlecloud", daemon=True)
             self._rt.worker, self._rt.stop = t, stop
             self._rt.wake.clear()
         t.start()
@@ -718,35 +858,44 @@ class GoogleCloudPlugin(MachinePlugin):
             stop.set()
             self._rt.wake.set()
         if t is not None and t is not threading.current_thread():
-            t.join(timeout=10)
+            t.join(timeout=JOIN_S)
+            if t.is_alive():  # still in a request: it ends there, reading and writing nothing more (its stop is set)
+                with self._rt.lock:
+                    self._rt.lingering.append(t)
 
-    def _work(self, stop: threading.Event) -> None:
+    def _work(self, stop: threading.Event, login) -> None:
         """The background: the project read every REFRESH_S (and soon after a power change), the Dynamic DNS hosts
-        checked every GOOGLECLOUD_DDNS_MINUTES; nothing done for what is not set."""
+        checked every GOOGLECLOUD_DDNS_MINUTES, with the settings of the login it was attached with (asked again every
+        CONFIG_S); nothing done for what is not set, and nothing at all once `stop` is set (detached)."""
         next_read = next_ddns = 0.0
+        kept: tuple[float, int, Config] | None = None
         while not stop.is_set():
             now = time.monotonic()
             cfg = None
             try:
-                cfg = self.config()
+                with self._rt.lock:
+                    entered = self._rt.entered
+                if kept is None or now - kept[0] >= CONFIG_S or kept[1] != entered:
+                    kept = (now, entered, settings_mod.read(login))
+                cfg = kept[2]
                 with self._rt.lock:
                     due_soon = bool(self._rt.soon) and self._rt.soon[0] <= now
                     if due_soon:
                         self._rt.soon = [t for t in self._rt.soon if t > now]
-                if cfg.ready and (now >= next_read or due_soon):
+                if cfg.ready and (now >= next_read or due_soon) and not stop.is_set():
                     if now >= next_read:
                         next_read = now + REFRESH_S
                     if self._rt.refreshing.acquire(blocking=False):  # Refresh asked meanwhile: that one is enough
                         try:
-                            self._refresh(cfg)
+                            self._refresh(cfg, stop)
                         except Exception:  # noqa: BLE001 - kept as its parts' outcome, shown by the status
                             pass
                         finally:
                             self._rt.refreshing.release()
-                if cfg.ddns_ready and now >= next_ddns:
+                if cfg.ddns_ready and now >= next_ddns and not stop.is_set():
                     next_ddns = now + cfg.minutes * 60.0
                     try:
-                        self._ddns_pass(cfg, force=False, wait=0.5)
+                        self._ddns_pass(cfg, force=False, wait=0.5, stop=stop)
                     except Exception:  # noqa: BLE001 - a pass under way (Update DNS now), or its trouble kept by the hosts
                         pass
             except Exception:  # noqa: BLE001 - the background never ends on a trouble; the status says it
@@ -756,7 +905,7 @@ class GoogleCloudPlugin(MachinePlugin):
             due = [t for t, on in ((next_read, cfg is not None and cfg.ready), (next_ddns, cfg is not None and cfg.ddns_ready),
                                    (soon or 0.0, soon is not None)) if on]
             wait = min([60.0, *(t - time.monotonic() for t in due)])
-            self._rt.wake.wait(max(1.0, wait))
+            self._rt.wake.wait(max(1.0, wait))  # Refresh, a power change or the detach (it sets the stop and this) wakes it
             self._rt.wake.clear()
 
     # -- what the platform's page shows -------------------------------------------------------------------------------------
@@ -818,12 +967,15 @@ class GoogleCloudPlugin(MachinePlugin):
             out["ddnsEvery"] = f"every {cfg.minutes:g} min" + ("" if attached else ", once attached")
         out["tables"] = self._tables(cfg, project, instances, disks, addresses, rules, regions, zones, types, dns_zones,
                                      records, hosts, keeper, attached)
-        out["forms"] = self._forms(project is not None, instances, addresses, rules, dns_zones, records)
+        out["forms"] = self._forms(project is not None, instances, addresses, rules, dns_zones, records, types)
+        if cfg.ddns_ready:
+            k = keeper or self.keeper()
+            out["forms"] += [k.take_form(), k.now_form()]
         out["actions"] = [{"hook": "refresh", "args": [], "title": "Refresh",
                            "note": "the project read again now (a dozen requests or so)"}]
         if cfg.ddns_ready:
-            out["actions"].append({"hook": "ddns_update", "args": [], "title": "Update DNS now",
-                                   "note": "each Dynamic DNS host's A record set now to this network's address"})
+            out["actions"].append({"form": "ddns-now", "title": "Update DNS now",
+                                   "note": "each Dynamic DNS host that is its own set now to this network's address"})
         return out
 
     def _summary(self, works, parts, instances, rules, dns_zones, billing, attached) -> str:
@@ -849,11 +1001,9 @@ class GoogleCloudPlugin(MachinePlugin):
         out = []
         if cfg.ddns_ready:
             k = keeper or self.keeper()
-            table = k.table(hosts, cfg.minutes, attached=attached, when=when)
-            if not hosts:
-                table["empty"] = (f"No host of {DDNS_HOSTS} is in a public Cloud DNS zone of the project"
-                                  + ("" if dns_zones is not None else " (the zones are read first)") + ".")
-            out.append(table)
+            empty = None if hosts else (f"No host of {DDNS_HOSTS} is in a public Cloud DNS zone of the project"
+                                        + ("" if dns_zones is not None else " (the zones are read first)") + ".")
+            out.append(k.table(hosts, cfg.minutes, attached=attached, when=when, empty=empty, take=True))
         static = _static_ips(addresses)
         if project is not None or instances:
             out.append(self._servers_table(instances, static, types))
@@ -927,11 +1077,11 @@ class GoogleCloudPlugin(MachinePlugin):
 
     # -- the forms (the platform's status.forms: each confirmed, a risky one asked twice) -------------------------------------
     @staticmethod
-    def _forms(compute_read: bool, instances, addresses, rules, dns_zones, records) -> list[dict]:
+    def _forms(compute_read: bool, instances, addresses, rules, dns_zones, records, types) -> list[dict]:
         """The forms for what was read: each server's power, the firewall rules', each zone's records', the keys'."""
         out: list[dict] = []
         for inst in instances:
-            out += _power_forms(inst, addresses)
+            out += _power_forms(inst, addresses, types)
         if compute_read:
             networks = sorted({fw.network_of(r) for r in rules} | {fw.network_of(n) for i in instances
                                                                    for n in i.get("networkInterfaces") or []} - {""})
@@ -1024,18 +1174,50 @@ def _stop_lines(inst: Mapping, addresses) -> list[str]:
     return out
 
 
-def _power_forms(inst: Mapping, addresses) -> list[dict]:
+def _fqdn(text: str) -> str:
+    """A host of the settings as the keeper names it (home.example.com; @.example.com is example.com)."""
+    name = str(text or "").strip().rstrip(".").lower()
+    return name[2:] if name.startswith("@.") else name
+
+
+def _gpus(inst: Mapping, mt: Mapping) -> tuple[list[str], int]:
+    """The GPUs a server carries, in words (2 × nvidia-tesla-t4), its own and its machine type's, and how many."""
+    found = [(int(a.get("acceleratorCount") or 1), name_of(a.get("acceleratorType")))
+             for a in inst.get("guestAccelerators") or [] if a.get("acceleratorType")]
+    found += [(int(a.get("guestAcceleratorCount") or 1), str(a.get("guestAcceleratorType")))
+              for a in mt.get("accelerators") or [] if a.get("guestAcceleratorType")]
+    return [f"{n} × {kind}" for n, kind in found], sum(n for n, _ in found)
+
+
+def _start_charges(inst: Mapping, types: Mapping) -> str:
+    """What starting a server bills again, in words: its machine type's vCPUs and memory, its GPUs, a premium image's
+    licence (Compute Engine bills them while it runs)."""
+    mt_name = name_of(inst.get("machineType"))
+    mt = types.get((name_of(inst.get("zone")), mt_name)) or {}
+    shape = _shape(mt)
+    gpus, count = _gpus(inst, mt)
+    licensed = any(d.get("licenses") for d in inst.get("disks") or [])
+    return (f"its vCPUs and memory ({mt_name or 'its machine type'}{': ' + shape if shape else ''}) bill again while it runs"
+            + (f", and its GPU{'' if count == 1 else 's'} ({', '.join(gpus)})" if gpus else "")
+            + (", with any premium image licence its disks carry" if licensed else ""))
+
+
+def _power_forms(inst: Mapping, addresses, types: Mapping) -> list[dict]:
     name, zone, status = str(inst.get("name")), name_of(inst.get("zone")), str(inst.get("status") or "")
     fields = [{"name": "zone", "label": "Zone", "type": "fixed", "value": zone},
               {"name": "instance", "label": "Server", "type": "fixed", "value": name}]
     out = []
     if status == "TERMINATED":
-        out.append({"id": f"start:{zone}/{name}", "hook": "start_server", "title": f"Start {name}", "fields": fields,
+        charges = _start_charges(inst, types)
+        out.append({"id": f"start:{zone}/{name}", "hook": "start_server", "title": f"Start {name}",
+                    "fields": [*fields, {"name": ACCEPT_COSTS, "type": "accept", "title": "Resume its charges?",
+                                         "yes": "Start it, billing",
+                                         "words": f"Started, {name} bills until it is stopped again: the charges named above."}],
                     "confirm": {"title": f"Start {name}?",
-                                "words": (f"{name} is started in {zone}: its vCPUs and memory bill again while it runs "
-                                          "(Compute Engine bills a running server; a stopped one only its disks and "
-                                          "addresses). An ephemeral external address it gets is a new one."),
-                                "yes": "Start it"}})
+                                "words": (f"{name} is started in {zone}: {charges} (Compute Engine bills a running "
+                                          "server; a stopped one only its disks and addresses). An ephemeral external "
+                                          "address it gets is a new one. You are asked again before it is sent."),
+                                "yes": "Start it", "danger": True}})
     if status in ("RUNNING", "PROVISIONING", "STAGING", "REPAIRING") and not _local_ssd(inst):
         seconds = 30 if _spot(inst) else 120
         lines = _stop_lines(inst, addresses)
@@ -1084,14 +1266,15 @@ def _add_rule_form(networks: list[str]) -> dict:
                  "placeholder": str(fw.PRIORITY_DEFAULT), "empty": f"{fw.PRIORITY_DEFAULT} (lower comes first)"},
                 {"name": "description", "label": "Description", "type": "text", "placeholder": "what it is for",
                  "empty": "none"},
-                {"name": ACCEPT_OPEN, "type": "accept", "title": "Open it to the whole internet?", "yes": "Add it anyway",
-                 "words": ("Anyone on the internet may then reach what it opens on the servers it applies to, and try "
-                           "their SSH or every port.")}],
+                {"name": ACCEPT_OPEN, "type": "accept", "title": "Add this rule anyway?", "yes": "Add it anyway",
+                 "words": ("Added, it does what is said above: anyone on the internet may then reach and try what it "
+                           "opens on the servers it applies to, or SSH denied may lock you out of them.")}],
             "submit": "Review the rule",
             "confirm": {"title": "Add this rule?",
                         "words": ("{name} is added to {network}: {action}, {direction}, {protocol} {ports}, addresses "
-                                  "{ranges}, targets {target_tags}, priority {priority}. A rule that opens SSH or every "
-                                  "port to the whole internet is asked again."),
+                                  "{ranges}, targets {target_tags}, priority {priority}. A rule letting anything but "
+                                  "the web's ports 80 and 443 in from the whole internet, or denying SSH, is asked "
+                                  "again."),
                         "yes": "Add the rule"}}
 
 
@@ -1099,12 +1282,12 @@ def _remove_rule_form() -> dict:
     return {"id": "firewall:remove", "hook": "remove_firewall_rule", "title": "Remove a VPC firewall rule",
             "fields": [{"name": "name", "label": "Rule", "type": "fixed"},
                        {"name": ACCEPT_REMOVE, "type": "accept", "title": "Remove it anyway?", "yes": "Remove it anyway",
-                        "words": ("Removing {name} may lock you out of the servers named (SSH), or let in what it kept "
-                                  "out, until another rule is added.")}],
+                        "words": ("Removing {name} may lock you out of the servers named (SSH or RDP), or let in what it "
+                                  "kept out, until another rule is added.")}],
             "confirm": {"title": "Remove this rule?",
                         "words": ("{name} is removed: what it allowed or denied is then decided by the rules left (a "
-                                  "network denies ingress unless a rule allows it). A rule letting SSH in to a server, "
-                                  "or denying ingress to one, is asked again."),
+                                  "network denies ingress unless a rule allows it). A rule letting SSH or RDP in to a "
+                                  "server, or denying ingress to one, is asked again."),
                         "yes": "Remove the rule", "danger": True}}
 
 
@@ -1151,8 +1334,11 @@ def _key_forms() -> list[dict]:
                     {"name": "key", "label": "Public key", "type": "text", "required": True,
                      "placeholder": "ssh-ed25519 AAAAC3… you@pc", "note": "the .pub file's line, never the private key"}],
          "submit": "Review the key",
-         "confirm": {"title": "Add this key?", "words": "{user} may then log in to the project's servers with this key. " + safe,
-                     "yes": "Add the key"}},
+         "confirm": {"title": "Add this key?",
+                     "words": ("{user} may then log in with this key to every server of the project that takes "
+                               "project-wide keys, as an administrator: Google's guest agent adds the accounts it makes "
+                               "from metadata keys to google-sudoers, whose members get sudo. " + safe),
+                     "yes": "Add the key", "danger": True}},
         {"id": "ssh:remove", "hook": "remove_ssh_key", "title": "Remove a project-wide SSH key",
          "fields": [{"name": "user", "label": "User", "type": "fixed"}, {"name": "fingerprint", "label": "Key", "type": "fixed"}],
          "confirm": {"title": "Remove this key?",

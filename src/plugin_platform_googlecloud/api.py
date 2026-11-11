@@ -5,10 +5,10 @@ the library's RestClient: a rate limit waited out, a read tried again, a write n
 key's secrets taken out.
 
 Every request the plugin makes is one of ENDPOINTS (the API card names each: the contract test compares them), and the
-only changes among them are the free ones (WRITES): a server started, stopped or reset; a VPC firewall rule added or
-removed; the project's common metadata set (its SSH keys, with the metadata's fingerprint); a Cloud DNS change (record
-sets added and deleted). `_send` refuses any other write before anything is sent. Nothing here makes, resizes,
-snapshots, reserves or deletes a billable thing.
+only changes among them are these (WRITES): a server started (it resumes its charges: the plugin asks twice), stopped
+or reset; a VPC firewall rule added or removed; the project's common metadata set (its SSH keys, with the metadata's
+fingerprint); a Cloud DNS change (record sets added and deleted). `_send` refuses any other write before anything is
+sent. Nothing here makes, resizes, snapshots, reserves or deletes a billable thing.
 
 Lists are read across their pages (pageToken, nextPageToken); an aggregated list's items are a map of scopes (zones,
 regions) to their resources, read with returnPartialSuccess as Google recommends, the scopes it could not reach said
@@ -53,7 +53,7 @@ ENDPOINTS: dict[str, tuple[str, str, str]] = {
     "billing_info": ("billing", "GET", "/projects/{project}/billingInfo"),
     "billing_account": ("billing", "GET", "/billingAccounts/{account}"),
 }
-# the changes the plugin makes: free ones alone (the user, 2026-11-11: "Free changes only")
+# the changes the plugin makes (the user, 2026-11-11: "Free changes only"; a start, resuming a charge, is asked twice)
 WRITES = frozenset({"start", "stop", "reset", "firewall_add", "firewall_remove", "set_metadata", "change"})
 PAGES_MOST = 20  # a list read across at most this many pages
 PAGE_SIZE = 500  # Compute's most a page

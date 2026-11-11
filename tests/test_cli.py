@@ -48,6 +48,11 @@ def test_a_change_asks_yes_first_and_a_reset_twice(made, env):
     assert code == 1 and len(fake.writes()) == 1
     code, out, _ = run(p, "power", "web-1", "reboot", answers=["yes", "yes"])
     assert code == 0 and fake.writes()[-1]["path"].endswith("/web-1/reset")
+    code, out, err = run(p, "power", "batch-1", "on", answers=["yes", "no"])  # a start resumes charges: asked twice
+    assert code == 1 and err == ["not asked: no yes"] and out[1].startswith("Again: starting batch-1 resumes its charges")
+    assert not any(w["path"].endswith("/start") for w in fake.writes())
+    code, out, _ = run(p, "power", "batch-1", "on", answers=["yes", "yes"])
+    assert code == 0 and "asked Google to start batch-1" in out and fake.writes()[-1]["path"].endswith("/batch-1/start")
     code, _, err = run(p, "power", "nobody", "on", answers=["yes"])
     assert code == 1 and err == ["refused: no server named nobody in the project"]
     code, out, _ = run(p, "set", "example-com", "home", "A", HOME, "--ttl", "120", answers=["yes"])

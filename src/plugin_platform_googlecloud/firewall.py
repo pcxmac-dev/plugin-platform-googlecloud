@@ -6,8 +6,10 @@ denies ingress and allows egress unless a rule says otherwise. The rules cost no
 off here).
 
 What a rule reaches is worked out from the servers read (their network interfaces, network tags and service accounts).
-A change is risky, and asked twice, when it opens SSH or every port to the whole internet (0.0.0.0/0 or ::/0), when it
-removes the rule letting SSH in to a server it reaches, or when it removes a rule denying ingress to one."""
+A change is risky, and asked twice (an audit before any key went in, 2026-11-11, widened it):
+- adding a rule that denies SSH (it may lock you out), or one letting anything in from the whole internet (0.0.0.0/0
+  or ::/0) but the web's ports 80 and 443: SSH, RDP, Docker's API, SSH moved to 2222, any other port, every port, ping;
+- removing the rule that lets SSH or RDP in to a server it reaches, or one denying ingress to such a server."""
 from __future__ import annotations
 
 import ipaddress
@@ -20,6 +22,11 @@ NAME = re.compile(r"^[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?$")  # a rule's, a network
 PROTOCOLS = {"tcp": "TCP (ports)", "udp": "UDP (ports)", "icmp": "ICMP (ping)"}  # offered by the page's form
 PORTED = frozenset({"tcp", "udp", "sctp"})
 SSH = 22
+WEB = frozenset({80, 443})  # the ports let in from the whole internet on one confirmation: a website's alone
+REMOTE = ((22, "SSH"), (3389, "RDP"))  # the ways in to a server: the rule letting them in is asked twice to remove
+KNOWN = {22: "SSH", 23: "Telnet", 445: "SMB", 2222: "SSH, moved", 2375: "Docker's API, unauthenticated",
+         2376: "Docker's API", 3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL", 5900: "VNC", 5985: "WinRM",
+         5986: "WinRM", 6379: "Redis", 9200: "Elasticsearch", 11211: "memcached", 27017: "MongoDB"}  # named in words
 PRIORITY_DEFAULT = 1000
 RANGES_MOST = 64  # ranges taken by one rule here
 
@@ -30,6 +37,10 @@ def network_of(rule_or_nic: Mapping) -> str:
 
 def proto_of(entry: Mapping) -> str:
     return str(entry.get("IPProtocol") or "").strip().lower()
+
+
+def direction_of(rule: Mapping) -> str:
+    return str(rule.get("direction") or "INGRESS").upper()
 
 
 def what(entries: Sequence[Mapping]) -> str:
@@ -54,7 +65,7 @@ def entries_of(rule: Mapping) -> list[Mapping]:
 
 
 def ranges_of(rule: Mapping) -> list[str]:
-    key = "destinationRanges" if str(rule.get("direction") or "INGRESS").upper() == "EGRESS" else "sourceRanges"
+    key = "destinationRanges" if direction_of(rule) == "EGRESS" else "sourceRanges"
     return [str(r) for r in rule.get(key) or []]
 
 
@@ -79,15 +90,28 @@ def covers(entries: Sequence[Mapping], protocol: str, port: int | None) -> bool:
     return False
 
 
-def every_port(entries: Sequence[Mapping]) -> bool:
-    """Whether it takes every port of a protocol (or every protocol)."""
-    return any(proto_of(e) == "all" or (proto_of(e) in PORTED and not e.get("ports")) for e in entries or [])
+def web_only(entries: Sequence[Mapping]) -> bool:
+    """Whether a rule takes the web's ports alone: 80 and 443 of tcp or udp, each named (no range, no other port)."""
+    if not entries:
+        return False
+    for e in entries:
+        if proto_of(e) not in ("tcp", "udp") or not e.get("ports"):
+            return False
+        for x in e.get("ports") or []:
+            lo, _, hi = str(x).partition("-")
+            try:
+                low, high = int(lo), int(hi or lo)
+            except ValueError:
+                return False
+            if low != high or low not in WEB:
+                return False
+    return True
 
 
 def from_everywhere(rule: Mapping) -> bool:
     """An ingress rule whose sources are the whole internet (a range of /0, or no source at all: Google then takes
     0.0.0.0/0)."""
-    if str(rule.get("direction") or "INGRESS").upper() != "INGRESS":
+    if direction_of(rule) != "INGRESS":
         return False
     ranges = ranges_of(rule)
     if not ranges and not rule.get("sourceTags") and not rule.get("sourceServiceAccounts"):
@@ -128,42 +152,78 @@ def reaches(rule: Mapping, instances: Iterable[Mapping]) -> list[str]:
     return sorted(out)
 
 
-def lets_ssh_in(rule: Mapping) -> bool:
-    return (str(rule.get("direction") or "INGRESS").upper() == "INGRESS" and not rule.get("disabled")
-            and action_of(rule) == "allow" and covers(entries_of(rule), "tcp", SSH))
+def remote_ways(rule: Mapping) -> list[str]:
+    """The ways in to a server a rule's protocols and ports take, in words: SSH (tcp:22), RDP (tcp:3389)."""
+    entries = entries_of(rule)
+    return [f"{label} (tcp:{port})" for port, label in REMOTE if covers(entries, "tcp", port)]
+
+
+def opened(entries: Sequence[Mapping]) -> str:
+    """What a rule's protocols and ports take, in words, the well-known services named: tcp:3389 (RDP), tcp:2222 (SSH,
+    moved), every port of udp, icmp."""
+    parts = []
+    for e in entries or []:
+        p = proto_of(e)
+        if p == "all":
+            parts.append("every protocol")
+            continue
+        if p not in PORTED:
+            parts.append(p)
+            continue
+        ports = [str(x) for x in e.get("ports") or []]
+        if not ports:
+            parts.append(f"every port of {p}" + (" (SSH and RDP among them)" if p == "tcp" else ""))
+            continue
+        named = []
+        for x in ports:
+            label = KNOWN.get(int(x)) if x.isdigit() else None
+            named.append(f"{p}:{x}" + (f" ({label})" if label else ""))
+        parts.append(", ".join(named))
+    return " and ".join(parts) or "nothing"
+
+
+def _servers(rule: Mapping, instances: Sequence[Mapping]) -> str:
+    reached = reaches(rule, instances)
+    shown = ", ".join(reached[:6]) + (f" and {len(reached) - 6} more" if len(reached) > 6 else "")
+    return targets(rule) + (f" ({shown})" if reached else "")
+
+
+def risky_addition(rule: Mapping, instances: Sequence[Mapping] = ()) -> str | None:
+    """Why adding the rule is risky, in words (asked twice), or None (module docstring): a deny taking SSH, or an
+    allow letting in from the whole internet anything but the web's ports 80 and 443."""
+    entries = entries_of(rule)
+    on = _servers(rule, instances)
+    if action_of(rule) == "deny":
+        if not covers(entries, "tcp", SSH):
+            return None
+        if direction_of(rule) == "INGRESS":
+            return (f"it denies {opened(entries)} in from {', '.join(ranges_of(rule)) or '0.0.0.0/0'} to {on}: you may "
+                    "lock yourself out of them (SSH)")
+        return (f"it denies {opened(entries)} out of {on} to {', '.join(ranges_of(rule)) or 'anywhere'}: they can no "
+                "longer reach other servers by SSH")
+    if not from_everywhere(rule) or web_only(entries):
+        return None
+    everywhere = ", ".join(r for r in ranges_of(rule) if _is_everywhere(r)) or "0.0.0.0/0"
+    return f"it lets {opened(entries)} in from the whole internet ({everywhere}) to {on}"
 
 
 def risky_removal(rule: Mapping, instances: Sequence[Mapping]) -> str | None:
-    """Why removing the rule is risky, in words (asked twice), or None."""
-    if rule.get("disabled") or str(rule.get("direction") or "INGRESS").upper() != "INGRESS":
+    """Why removing the rule is risky, in words (asked twice), or None: it lets SSH or RDP in to a server it reaches
+    (removed, you may be locked out of it), or it denies ingress to one (removed, what it kept out may come in)."""
+    if rule.get("disabled") or direction_of(rule) != "INGRESS":
         return None
     servers = reaches(rule, instances)
     if not servers:
         return None
     shown = ", ".join(servers[:6]) + (f" and {len(servers) - 6} more" if len(servers) > 6 else "")
-    if lets_ssh_in(rule):
-        return (f"{rule.get('name')} lets SSH (tcp:22) in to {shown}: removing it may lock you out of "
-                f"{'them' if len(servers) > 1 else 'it'} unless another rule lets SSH in")
+    ways = remote_ways(rule)
+    if action_of(rule) == "allow" and ways:
+        return (f"{rule.get('name')} lets {' and '.join(ways)} in to {shown}: removing it may lock you out of "
+                f"{'them' if len(servers) > 1 else 'it'} unless another rule lets {'them' if len(ways) > 1 else 'it'} in")
     if action_of(rule) == "deny":
         return (f"{rule.get('name')} denies {what(entries_of(rule))} from {', '.join(ranges_of(rule)) or 'its sources'} to "
                 f"{shown}: removing it may let that in")
     return None
-
-
-def risky_addition(rule: Mapping) -> str | None:
-    """Why adding the rule is risky, in words (asked twice), or None: SSH or every port opened to the whole internet."""
-    if action_of(rule) != "allow" or not from_everywhere(rule):
-        return None
-    entries = entries_of(rule)
-    if every_port(entries):  # SSH among them when it is tcp
-        kinds = sorted({proto_of(e) for e in entries if proto_of(e) in PORTED | {"all"}})
-        opened = "every protocol" if "all" in kinds else "every port of " + " and ".join(kinds)
-    elif covers(entries, "tcp", SSH):
-        opened = "SSH (tcp:22)"
-    else:
-        return None
-    everywhere = ", ".join(r for r in ranges_of(rule) if _is_everywhere(r)) or "0.0.0.0/0"
-    return f"it opens {opened} to the whole internet ({everywhere}) on {targets(rule)}"
 
 
 def parse_ports(text: str | None, protocol: str) -> list[str]:
@@ -252,7 +312,7 @@ def build(name: str, network: str, direction: str, action: str, protocol: str, p
 
 def describe(rule: Mapping) -> str:
     """A rule in one line: allow tcp:22 in from 0.0.0.0/0 to every server of default, priority 1000."""
-    d = str(rule.get("direction") or "INGRESS").upper()
+    d = direction_of(rule)
     ranges = ", ".join(ranges_of(rule)) or ("its source tags" if rule.get("sourceTags")
                                             else "0.0.0.0/0" if d == "INGRESS" else "anywhere")
     return (f"{action_of(rule)} {what(entries_of(rule))} {'in from' if d == 'INGRESS' else 'out to'} {ranges} "

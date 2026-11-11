@@ -54,8 +54,8 @@ COMPUTE_RESOURCES = (
 _COMPUTE_PARTS = (
     ("Instances", "the virtual machines: made, started, stopped, suspended, reset, changed and deleted; their serial "
      "port, screenshots and guest attributes", ("instances", "instanceSettings", "regionInstances"), "instances",
-     "every zone's servers read (state, machine type, addresses, disks); started, stopped (gracefully) and reset (hard) "
-     "once confirmed"),
+     "every zone's servers read (state, machine type, addresses, disks); stopped (gracefully) once confirmed; started "
+     "(its charges resume) and reset (hard) asked twice"),
     ("Machine and accelerator types", "the shapes a server takes (vCPUs, memory) and the GPUs a zone offers",
      ("machineTypes", "acceleratorTypes"), "machineTypes", "each server's vCPUs and memory, read once a machine type"),
     ("Disks", "persistent disks, zonal and regional, and their types: made, resized, attached, snapshotted",
@@ -79,7 +79,8 @@ _COMPUTE_PARTS = (
      "networks", ""),
     ("VPC firewall rules", "a network's allow and deny rules by direction, protocol, port, source and target",
      ("firewalls",), "firewalls",
-     "every rule read with the servers it reaches; rules added and removed once confirmed (a risky one asked twice)"),
+     "every rule read with the servers it reaches; rules added and removed once confirmed, a risky one asked twice (a "
+     "deny of SSH, anything but ports 80 and 443 let in from the whole internet, the rule letting SSH or RDP in)"),
     ("Firewall policies", "hierarchical, global and regional network firewall policies, evaluated beside the VPC rules",
      ("firewallPolicies", "networkFirewallPolicies", "regionNetworkFirewallPolicies"), "firewallPolicies", ""),
     ("Load balancing", "backend services and buckets, forwarding rules, target proxies, pools and instances, URL maps, "
@@ -143,7 +144,7 @@ COMPUTE_CALLS = (
     Call(f"GET {_I}/{{instance}}", "one instance", "Instances", used="a server read afresh before Start, Stop or Reset",
          docs=f"{_C}/instances/get"),
     Call(f"POST {_I}/{{instance}}/start", "starts a stopped instance: its vCPU and memory charges resume", "Instances",
-         used="Start…", docs=f"{_C}/instances/start", writes=True, costs=True),
+         used="Start… (asked twice, the charge it resumes named)", docs=f"{_C}/instances/start", writes=True, costs=True),
     Call(f"POST {_I}/{{instance}}/stop", "shuts an instance down (ACPI shutdown, up to 120 seconds); its disks and "
          "external addresses keep billing", "Instances", used="Stop…", docs=f"{_C}/instances/stop", writes=True),
     Call(f"POST {_I}/{{instance}}/reset", "a hard reset: no graceful shutdown, unsaved data lost", "Instances",
@@ -159,10 +160,12 @@ COMPUTE_CALLS = (
     Call(f"GET {_P}/global/firewalls", "the VPC firewall rules", "VPC firewall rules", used="the Firewall rules table",
          docs=f"{_C}/firewalls/list"),
     Call(f"POST {_P}/global/firewalls", "adds a VPC firewall rule (free; its logging is left off)", "VPC firewall rules",
-         used="Add a rule… (one opening SSH or every port to the internet asked twice)", docs=f"{_C}/firewalls/insert",
+         used="Add a rule… (one denying SSH, or letting anything but ports 80 and 443 in from the whole internet, asked "
+              "twice)", docs=f"{_C}/firewalls/insert",
          writes=True),
     Call(f"DELETE {_P}/global/firewalls/{{firewall}}", "removes a VPC firewall rule", "VPC firewall rules",
-         used="a rule's Remove (the one letting SSH in to a server asked twice)", docs=f"{_C}/firewalls/delete",
+         used="a rule's Remove (the one letting SSH or RDP in to a server, or denying ingress to one, asked twice)",
+         docs=f"{_C}/firewalls/delete",
          writes=True),
     Call(f"POST {_P}/setCommonInstanceMetadata", "the project's common metadata written whole, with its fingerprint",
          "Projects", used="Add a key… and a key's Remove (the ssh-keys item alone changed)",
@@ -234,6 +237,8 @@ COMPUTE = Api(
            Link("Instance lifecycle (what each state bills)",
                 "https://docs.cloud.google.com/compute/docs/instances/instance-lifecycle", "guide"),
            Link("Add SSH keys to VMs", "https://docs.cloud.google.com/compute/docs/connect/add-ssh-keys", "guide"),
+           Link("Guest agent functionality (accounts from metadata keys, google-sudoers)",
+                "https://docs.cloud.google.com/compute/docs/images/guest-agent-functions", "guide"),
            Link("VPC firewall rules", "https://docs.cloud.google.com/firewall/docs/firewalls", "guide"),
            Link("Access control (IAM roles)", "https://docs.cloud.google.com/compute/docs/access", "auth"),
            Link("Rate quotas and system limits", "https://docs.cloud.google.com/compute/api-quota", "limits"),
@@ -277,7 +282,8 @@ DNS_CALLS = (
          used="each zone's records table; a name's records read afresh before a change; a Dynamic DNS host's A record",
          docs=f"{_D}/resourceRecordSets/list"),
     Call(f"POST {_Z}/{{managedZone}}/changes", "record sets deleted and added at once", "changes",
-         used="Set a record…, a record's Remove, Dynamic DNS", docs=f"{_D}/changes/create", writes=True),
+         used="Set a record…, a record's Remove, Dynamic DNS (only a host that is its own, or taken over)",
+         docs=f"{_D}/changes/create", writes=True),
     Call(f"POST {_Z}", "makes a zone (it bills while it exists)", "managedZones",
          docs=f"{_D}/managedZones/create", writes=True, costs=True),
     Call(f"DELETE {_Z}/{{managedZone}}", "deletes a zone", "managedZones", docs=f"{_D}/managedZones/delete",
