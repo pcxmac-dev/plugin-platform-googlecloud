@@ -18,6 +18,9 @@ liminal-libs>=1.49.8):
   take-over refused because the record changed first reads it afresh, so the host's row and its Take over… offer what
   it holds now.
 
+Needs liminal-libs>=1.49.9: a take-over's consent is bound to the addresses it drops (a record changed after
+a failed write is asked about again); the state file keeps each take-over's addresses.
+
 ## 0.1.1 (2026-11-11)
 
 What an audit of the cloud plugins found before any key went in (session 87405e6a: eight reviewers, a skeptic per

@@ -13,7 +13,7 @@ requires-python = ">=3.10"
 # machines.ddns; the Login
 # interface: liminal_libs.apps), and the
 # RS256 signing of a service account's JWT (cryptography)
-dependencies = ["liminal-libs>=1.49.8", "cryptography>=42"]
+dependencies = ["liminal-libs>=1.49.9", "cryptography>=42"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

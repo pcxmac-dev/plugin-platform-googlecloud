@@ -73,7 +73,7 @@ def test_a_host_holding_another_address_is_left_as_it_is_and_a_new_one_made(made
     assert [h["result"] for h in p.ddns_update(force=False)["hosts"]][0] == "current"
     assert changes(fake) == []
     state = json.loads((Path(os.environ["LIMINAL_PLATFORM_DIR"]) / "googlecloud" / "ddns.json").read_text(encoding="utf-8"))
-    assert state == {"own": {"home.example.com": HOME}, "taken": []}  # kept under the platform's folder
+    assert state == {"own": {"home.example.com": HOME}, "taken": {}}  # kept under the platform's folder
 
 
 def test_taking_a_host_over_is_asked_twice_then_a_pass_points_it_here(made, env):
