@@ -63,7 +63,8 @@ def test_each_form_is_its_hooks_arguments_in_order(ready):
         assert f["confirm"]["title"] and f["confirm"]["words"] and f["confirm"]["yes"]
         for x in f["fields"]:
             if x["type"] == "accept":
-                assert x["name"] in (ACCEPT_RESET, ACCEPT_COSTS, ACCEPT_OPEN, ACCEPT_REMOVE) and x["words"] and x["yes"]
+                assert x["name"] in (ACCEPT_RESET, ACCEPT_COSTS, ACCEPT_OPEN, ACCEPT_REMOVE, "accept_take_over")
+                assert x["words"] and x["yes"]
     assert [r for r in fake.requests if r["method"] != "GET"] == []  # drawn: nothing changed
 
 

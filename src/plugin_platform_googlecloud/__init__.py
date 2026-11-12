@@ -51,7 +51,7 @@ from .card import APIS, BILLING_NAME, COMPUTE_NAME, DNS_NAME, OAUTH_NAME
 from .records import Refusal
 from .settings import CONSOLE_KEYS, DDNS_HOSTS, KEY, KEYS, NAMES, Config
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 REFRESH_S = 900.0  # the project read again at most this often while attached (or by Refresh)
 CONFIG_S = 30.0  # the settings asked of the login again after this long
 RETRY_S = 900.0  # a part that failed is taken as untried after this long while detached: attached again, it is tried again
@@ -177,7 +177,6 @@ class _Runtime:
         self.refreshed_at: float | None = None
         self.parts = {"compute": Outcome(), "dns": Outcome()}
         self.ddns_print = ""
-        self.ddns_seen: set[str] = set()  # the Dynamic DNS hosts of the settings as last seen (one taken out: let go)
         self.passing = threading.Lock()  # one Dynamic DNS pass at a time, with its settings and stop below
         self.pass_cfg: Config | None = None
         self.pass_stop: threading.Event | None = None
@@ -319,6 +318,8 @@ class GoogleCloudPlugin(MachinePlugin):
             return {"servers": 0, "zones": 0, "readAt": when(now), "troubles": ["detached"]}
         except READ_ERRORS as e:
             troubles["dns"] = _words(e)
+        if "dns" not in troubles and not (stop is not None and stop.is_set()):
+            self._settle(cfg)  # the zones read: a host the whole setting no longer names is let go
         with self._rt.lock:
             for part in ("compute", "dns"):
                 o = self._rt.parts[part]
@@ -645,18 +646,25 @@ class GoogleCloudPlugin(MachinePlugin):
                 "ok": all(h.get("ok") is not False or h.get("foreign") for h in hosts), "hosts": hosts,
                 "lines": [f"{h['host']}: {h['result']}" for h in hosts]}
 
-    def ddns_take_over(self, host: str, holds=None) -> dict:
-        """A Dynamic DNS host the user let the keeper take over (the page's Take over…, once confirmed: `holds`, what the
-        record held as the page showed it), then a pass for it: its A record pointed at this network's address."""
+    def ddns_take_over(self, host: str, holds=None, accept_take_over=False) -> dict:
+        """A Dynamic DNS host the user let the keeper take over (the page's Take over…, confirmed twice: `holds`, what the
+        record held as the page showed it; `accept_take_over`, the second confirmation, exactly true), then a pass for
+        it: its A record pointed at this network's address. Refused, with nothing taken, when the host is none of the
+        setting's, when its record no longer holds what the page showed, and without the second confirmation (the
+        keeper's TakeOverRefused, naming accept_take_over: the page asks it)."""
         cfg = self.config(fresh=True)
         if not cfg.ddns_ready:
             raise ValueError(f"Dynamic DNS is not set up: {DDNS_HOSTS} is not set" if cfg.ready else self._not_ready(cfg))
-        want = str(host or "").strip().rstrip(".").lower()
+        want = _fqdn(host)
         hosts, _ = self._hosts(cfg, read=True)
         found = next((h for h in hosts if h.fqdn == want), None)
         if found is None:
             raise Refusal(f"{want or '(no host)'} is none of the Dynamic DNS hosts set ({DDNS_HOSTS}) in a public zone")
-        self.keeper().take_over(found.fqdn)
+        now = self._record_now(cfg, found)
+        if holds not in (None, "") and sorted(_addresses(holds)) != sorted(now):
+            raise Refusal(f"{found.fqdn} holds {', '.join(now) or 'no A record'} now, not what the page showed ({holds}): "
+                          "nothing taken over; look at it again and take it over then")
+        self.keeper().take_over(found.fqdn, accept=accept_take_over, holds=str(holds or ", ".join(now)))
         states = self._ddns_pass(cfg, force=False, only=found.fqdn)
         state = states[0] if states else {"host": found.fqdn, "ok": None, "result": "not checked yet"}
         lines = ([f"it held {holds}"] if holds else []) + ["kept at this network's address from now on"]
@@ -666,13 +674,13 @@ class GoogleCloudPlugin(MachinePlugin):
     def _ddns_pass(self, cfg: Config, force: bool, wait: float = 120.0, stop: threading.Event | None = None,
                    only: str | None = None) -> list[dict]:
         """A pass over the hosts of `cfg` (`only`: that one) with `cfg`'s client; `stop` (the background's) set ends it
-        before its next write. A host taken out of the settings is let go first."""
+        before its next write. The hosts the keeper holds that the setting no longer names are let go first (settle)."""
         if not self._rt.passing.acquire(timeout=max(0.0, wait)):
             raise RuntimeError("a Dynamic DNS pass is under way")
         try:
             self._rt.pass_cfg, self._rt.pass_stop = cfg, stop
-            self._let_go(cfg)
             hosts, _ = self._hosts(cfg, read=True)
+            self._settle(cfg)
             if only is not None:
                 hosts = [h for h in hosts if h.fqdn == only]
             out = self.keeper().run_pass(hosts, force=force, wait=wait, stop=stop)
@@ -683,13 +691,24 @@ class GoogleCloudPlugin(MachinePlugin):
             self._rt.pass_cfg, self._rt.pass_stop = None, None
             self._rt.passing.release()
 
-    def _let_go(self, cfg: Config) -> None:
-        """The hosts taken out of the settings since they were last seen: no longer the keeper's own."""
-        now = {_fqdn(x) for x in re.split(r"[,;\s]+", cfg.hosts) if x.strip()}
+    def _settle(self, cfg: Config) -> None:
+        """Every host the keeper holds (its own, or taken over) that the whole Dynamic DNS setting no longer names let go
+        (the keeper's settle), while the plugin ran or not; only once the project's zones are read, never on a list
+        left short because they are not."""
         with self._rt.lock:
-            gone, self._rt.ddns_seen = self._rt.ddns_seen - now, now
-        for fqdn in sorted(gone):
-            self.keeper().let_go(fqdn)
+            read = self._rt.dns_zones is not None
+        if not read:
+            return
+        self.keeper().settle([_fqdn(x) for x in re.split(r"[,;\s]+", cfg.hosts) if x.strip()])
+
+    def _record_now(self, cfg: Config, host: Host) -> list[str]:
+        """The addresses a host's A record holds now (read afresh)."""
+        z = self._zone_of(host)
+        full = rec.dot(host.fqdn)
+        for s in self.client(cfg).rrsets(str(z["name"]), name=full, rtype="A"):
+            if str(s.get("type")) == "A" and rec.dot(s.get("name")) == full:
+                return [str(v) for v in s.get("rrdatas") or []]
+        return []
 
     # -- Dynamic DNS through Cloud DNS ------------------------------------------------------------------------------------
     def _public_zones(self) -> list[dict]:
@@ -1178,6 +1197,11 @@ def _fqdn(text: str) -> str:
     """A host of the settings as the keeper names it (home.example.com; @.example.com is example.com)."""
     name = str(text or "").strip().rstrip(".").lower()
     return name[2:] if name.startswith("@.") else name
+
+
+def _addresses(text) -> list[str]:
+    """The addresses a record held as the page showed them ("203.0.113.9, 198.51.100.7")."""
+    return [x for x in re.split(r"[,;\s]+", str(text or "").strip()) if x]
 
 
 def _gpus(inst: Mapping, mt: Mapping) -> tuple[list[str], int]:

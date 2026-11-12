@@ -121,11 +121,13 @@ Cloud DNS's API, through the library's Keeper (liminal-libs 1.49.2). It changes 
 record (it is made), one already pointing at this network, one holding the address it set last (after the network's
 address changed, after a restart too: what is its own is kept in `googlecloud/ddns.json` under the platform's folder,
 `LIMINAL_PLATFORM_DIR`, else the data folder's `platform/`), and one you took over. Any other record, another address
-or several, is left as it is and said so, with **Take over…** on its row: confirmed, the host is pointed here on the
-next pass and kept there. Several addresses are never cut to one unasked. Just before a write the address is asked
+or several, is left as it is and said so, with **Take over…** on its row. A take-over sets the record at once and
+drops every address it holds, so it is asked twice, and refused when the record no longer holds what the page showed;
+then the host is pointed here and kept there. Several addresses are never cut to one unasked. Just before a write the address is asked
 again, and the record read again: changed meanwhile to what is not its own, it is left as it is. Only hosts of the
 project's public zones are kept (a private zone answers inside its VPC networks alone); a host holding a CNAME is never
-written over; a host taken out of the settings is let go.
+written over. A host taken out of the setting, while the plugin ran or not, is let go (the keeper's `settle`, with the
+whole setting, once the project's zones are read): put back later, it is its own again only if it points here.
 
 ## Its API
 
@@ -183,7 +185,7 @@ and where a key is made.
 ports, ranges, target_tags, priority, description, accept_open_to_internet=False)`,
 `remove_firewall_rule(name, accept_risky_removal=False)`, `set_record(zone, name, rtype, data, ttl=None)`,
 `remove_record(zone, name, rtype, data)`, `add_ssh_key(user, key)`, `remove_ssh_key(user, fingerprint)`,
-`ddns_update(force=True)`, `ddns_take_over(host, holds=None)`. A refused change raises a refusal naming the argument
+`ddns_update(force=True)`, `ddns_take_over(host, holds=None, accept_take_over=False)`. A refused change raises a refusal naming the argument
 that accepts it, when one does (the page asks it as a second confirmation).
 
 ## From the command line

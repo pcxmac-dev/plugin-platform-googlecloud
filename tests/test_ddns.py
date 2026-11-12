@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from conftest import HOME, PROJECT, settings_of
+from conftest import HOME, PROJECT, FakeGoogle, settings_of
+from liminal_libs.machines.ddns import TakeOverRefused
 from plugin_platform_googlecloud import PUBLIC_IPV4, GoogleCloudPlugin
 
 D = f"/dns/v1/projects/{PROJECT}/managedZones"
@@ -75,22 +76,87 @@ def test_a_host_holding_another_address_is_left_as_it_is_and_a_new_one_made(made
     assert state == {"own": {"home.example.com": HOME}, "taken": []}  # kept under the platform's folder
 
 
-def test_taking_a_host_over_then_a_pass_points_it_here(made, env):
+def test_taking_a_host_over_is_asked_twice_then_a_pass_points_it_here(made, env):
     env(settings_of(GOOGLECLOUD_DDNS_HOSTS="@.example.com"))
     p, fake = made()
     p.refresh()
     p.ddns_update(force=False)
     assert changes(fake) == []
     take = next(f for f in p.status()["forms"] if f["id"] == "ddns-take")
-    assert [x["name"] for x in take["fields"]] == ["host", "holds"]
-    rep = p.ask("ddns_take_over", "example.com", "198.51.100.7")  # what the page sends once confirmed
+    assert [x["name"] for x in take["fields"]] == ["host", "holds", "accept_take_over"]
+    assert take["fields"][2]["type"] == "accept"
+    with pytest.raises(TakeOverRefused) as refused:  # the page's first yes alone: nothing taken
+        p.ask("ddns_take_over", "example.com", "198.51.100.7", False)
+    assert refused.value.accept == "accept_take_over" and "holds 198.51.100.7" in str(refused.value)
+    for given in ("true", 1, "yes"):  # a program's text or number is no second yes
+        with pytest.raises(TakeOverRefused):
+            p.ask("ddns_take_over", "example.com", "198.51.100.7", given)
+    assert not p.keeper().taken("example.com") and changes(fake) == []
+    rep = p.ask("ddns_take_over", "example.com", "198.51.100.7", True)  # both confirmations given
+    assert p.keeper().taken("example.com")
     assert rep["ok"] and rep["said"] == "example.com taken over: set (was 198.51.100.7)"
     (taken,) = changes(fake)
     assert taken["deletions"] == [{"name": "example.com.", "type": "A", "ttl": 300, "rrdatas": ["198.51.100.7"]}]
     assert taken["additions"] == [{"name": "example.com.", "type": "A", "ttl": 300, "rrdatas": [HOME]}]
     assert a_record(fake, "example.com.") == [HOME]
     with pytest.raises(ValueError, match="none of the Dynamic DNS hosts set"):
-        p.ddns_take_over("www.example.org")
+        p.ddns_take_over("www.example.org", None, True)
+
+
+def test_a_take_over_is_refused_when_the_record_no_longer_holds_what_the_page_showed(made, env):
+    env(settings_of(GOOGLECLOUD_DDNS_HOSTS="@.example.com"))
+    p, fake = made()
+    p.refresh()
+    p.ddns_update(force=False)
+    next(s for s in fake.rrsets["example-com"] if s["name"] == "example.com." and s["type"] == "A")["rrdatas"] = ["198.51.100.8"]
+    with pytest.raises(ValueError, match=r"example.com holds 198.51.100.8 now, not what the page showed \(198.51.100.7\)"):
+        p.ddns_take_over("example.com", "198.51.100.7", True)
+    assert not p.keeper().taken("example.com") and changes(fake) == []
+
+
+def test_a_host_taken_over_then_taken_out_of_the_setting_is_let_go(env):
+    """Taken over, then taken out of the setting: the next pass lets it go (the keeper's settle). Put back later, after
+    the network's address changed, its record (at the old address) is no longer the keeper's: left as it is, its row
+    offering Take over… again."""
+    env(settings_of(GOOGLECLOUD_DDNS_HOSTS="@.example.com"))
+    fake, address = FakeGoogle(), [HOME]
+    p = GoogleCloudPlugin(transport=fake, public=lambda: (address[0], "a stand-in"), sleep=lambda s: None)
+    p.refresh()
+    p.ddns_update(force=False)
+    p.ddns_take_over("example.com", "198.51.100.7", True)
+    assert a_record(fake, "example.com.") == [HOME] and p.keeper().known() == ["example.com"]
+    env({"GOOGLECLOUD_DDNS_HOSTS": "home.example.com"})  # example.com taken out of the setting
+    p.settings_changed()
+    p.ddns_update(force=False)
+    assert "example.com" not in p.keeper().known() and not p.keeper().taken("example.com")
+    address[0] = NEW  # the network moved; then example.com is put back in the setting
+    env({"GOOGLECLOUD_DDNS_HOSTS": "home.example.com, @.example.com"})
+    p.settings_changed()
+    fake.requests.clear()
+    hosts = {h["host"]: h for h in p.ddns_update(force=True)["hosts"]}
+    assert hosts["example.com"]["foreign"] is True and hosts["example.com"]["result"].startswith(f"holds {HOME}, not this")
+    assert a_record(fake, "example.com.") == [HOME] and not any(c["additions"][0]["name"] == "example.com."
+                                                                for c in changes(fake))
+    row = next(r for r in table(p)["rows"] if r[0] == "example.com")
+    assert row[-1]["form"] == "ddns-take" and row[-1]["values"] == {"host": "example.com", "holds": HOME}
+
+
+def test_a_refresh_lets_go_of_a_host_taken_out_while_the_plugin_was_not_running(made, env):
+    """What the keeper holds outlives the plugin (its state file); a host taken out of the setting meanwhile is let go
+    by the first refresh that reads the zones, never by one that could not."""
+    env(settings_of(GOOGLECLOUD_DDNS_HOSTS="home.example.com"))
+    p, fake = made()
+    p.refresh()
+    p.ddns_update(force=False)
+    assert p.keeper().known() == ["home.example.com"]
+    env({"GOOGLECLOUD_DDNS_HOSTS": ""})  # taken out while no plugin ran
+    again = GoogleCloudPlugin(transport=fake, public=lambda: (HOME, "a stand-in"), sleep=lambda s: None)
+    fake.fail[("GET", r"/managedZones$")] = (503, {"error": {"code": 503, "message": "backend", "status": "UNAVAILABLE"}})
+    again.refresh()  # the zones not read: nothing let go on a list left short
+    assert again.keeper().known() == ["home.example.com"]
+    del fake.fail[("GET", r"/managedZones$")]
+    again.refresh()
+    assert again.keeper().known() == []
 
 
 def test_a_host_with_several_addresses_is_never_cut_to_one(made, env):
