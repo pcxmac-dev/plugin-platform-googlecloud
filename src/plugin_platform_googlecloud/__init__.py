@@ -649,9 +649,11 @@ class GoogleCloudPlugin(MachinePlugin):
     def ddns_take_over(self, host: str, holds=None, accept_take_over=False) -> dict:
         """A Dynamic DNS host the user let the keeper take over (the page's Take over…, confirmed twice: `holds`, what the
         record held as the page showed it; `accept_take_over`, the second confirmation, exactly true), then a pass for
-        it: its A record pointed at this network's address. Refused, with nothing taken, when the host is none of the
-        setting's, when its record no longer holds what the page showed, and without the second confirmation (the
-        keeper's TakeOverRefused, naming accept_take_over: the page asks it)."""
+        it: its A record pointed at this network's address. A pass for the host comes first, reading what it holds now
+        (and writing only where the record is the keeper's own), so its row says what it holds and its Take over…
+        carries that. Refused, with nothing taken, when the host is none of the setting's, when its record no longer
+        holds what the page showed, and without the second confirmation (the keeper's TakeOverRefused, naming
+        accept_take_over: the page asks it). The consent is used up once its write lands (liminal-libs 1.49.8)."""
         cfg = self.config(fresh=True)
         if not cfg.ddns_ready:
             raise ValueError(f"Dynamic DNS is not set up: {DDNS_HOSTS} is not set" if cfg.ready else self._not_ready(cfg))
@@ -660,14 +662,21 @@ class GoogleCloudPlugin(MachinePlugin):
         found = next((h for h in hosts if h.fqdn == want), None)
         if found is None:
             raise Refusal(f"{want or '(no host)'} is none of the Dynamic DNS hosts set ({DDNS_HOSTS}) in a public zone")
-        now = self._record_now(cfg, found)
+        keeper = self.keeper()
+        self._ddns_pass(cfg, force=False, only=found.fqdn)  # what it holds now: the host's state (its row) said afresh
+        st = keeper.state(found.fqdn)
+        if st is None or not st.foreign:  # its own (current or set now), or not readable: nothing to take over
+            said = st.result if st is not None else "not read"
+            return {"said": f"{found.fqdn}: {said}", "ok": st is not None and st.ok is not False,
+                    "host": st.describe() if st is not None else {"host": found.fqdn}, "lines": []}
+        now = list(st.holds)
         if holds not in (None, "") and sorted(_addresses(holds)) != sorted(now):
             raise Refusal(f"{found.fqdn} holds {', '.join(now) or 'no A record'} now, not what the page showed ({holds}): "
-                          "nothing taken over; look at it again and take it over then")
-        self.keeper().take_over(found.fqdn, accept=accept_take_over, holds=str(holds or ", ".join(now)))
+                          "nothing taken over; its row's Take over… offers what it holds now")
+        keeper.take_over(found.fqdn, accept=accept_take_over, holds=", ".join(now))
         states = self._ddns_pass(cfg, force=False, only=found.fqdn)
         state = states[0] if states else {"host": found.fqdn, "ok": None, "result": "not checked yet"}
-        lines = ([f"it held {holds}"] if holds else []) + ["kept at this network's address from now on"]
+        lines = [f"it held {', '.join(now)}", "kept at this network's address from now on"]
         return {"said": f"{found.fqdn} taken over: {state['result']}", "ok": state.get("ok") is not False,
                 "host": state, "lines": lines}
 
@@ -693,22 +702,17 @@ class GoogleCloudPlugin(MachinePlugin):
 
     def _settle(self, cfg: Config) -> None:
         """Every host the keeper holds (its own, or taken over) that the whole Dynamic DNS setting no longer names let go
-        (the keeper's settle), while the plugin ran or not; only once the project's zones are read, never on a list
-        left short because they are not."""
+        (the keeper's settle), while the plugin ran or not; only by the serving platform's plugin (never from a command
+        line of its own, whose shell's setting may lack the hosts and would empty the shared state), and only once the
+        project's zones are read, never on a list left short because they are not."""
+        app = self.app
+        if app is None or getattr(app, "NAME", "") != PLATFORM or getattr(app, "once", False):
+            return
         with self._rt.lock:
             read = self._rt.dns_zones is not None
         if not read:
             return
         self.keeper().settle([_fqdn(x) for x in re.split(r"[,;\s]+", cfg.hosts) if x.strip()])
-
-    def _record_now(self, cfg: Config, host: Host) -> list[str]:
-        """The addresses a host's A record holds now (read afresh)."""
-        z = self._zone_of(host)
-        full = rec.dot(host.fqdn)
-        for s in self.client(cfg).rrsets(str(z["name"]), name=full, rtype="A"):
-            if str(s.get("type")) == "A" and rec.dot(s.get("name")) == full:
-                return [str(v) for v in s.get("rrdatas") or []]
-        return []
 
     # -- Dynamic DNS through Cloud DNS ------------------------------------------------------------------------------------
     def _public_zones(self) -> list[dict]:

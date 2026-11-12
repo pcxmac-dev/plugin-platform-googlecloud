@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import HOME, PROJECT, FakeGoogle, settings_of
+from conftest import HOME, PROJECT, FakeGoogle, Platform, settings_of
 from liminal_libs.machines.ddns import TakeOverRefused
 from plugin_platform_googlecloud import PUBLIC_IPV4, GoogleCloudPlugin
 
@@ -93,7 +93,7 @@ def test_taking_a_host_over_is_asked_twice_then_a_pass_points_it_here(made, env)
             p.ask("ddns_take_over", "example.com", "198.51.100.7", given)
     assert not p.keeper().taken("example.com") and changes(fake) == []
     rep = p.ask("ddns_take_over", "example.com", "198.51.100.7", True)  # both confirmations given
-    assert p.keeper().taken("example.com")
+    assert p.keeper().own("example.com") == HOME and not p.keeper().taken("example.com")  # its consent used up: its own
     assert rep["ok"] and rep["said"] == "example.com taken over: set (was 198.51.100.7)"
     (taken,) = changes(fake)
     assert taken["deletions"] == [{"name": "example.com.", "type": "A", "ttl": 300, "rrdatas": ["198.51.100.7"]}]
@@ -112,6 +112,8 @@ def test_a_take_over_is_refused_when_the_record_no_longer_holds_what_the_page_sh
     with pytest.raises(ValueError, match=r"example.com holds 198.51.100.8 now, not what the page showed \(198.51.100.7\)"):
         p.ddns_take_over("example.com", "198.51.100.7", True)
     assert not p.keeper().taken("example.com") and changes(fake) == []
+    row = next(r for r in table(p)["rows"] if r[0] == "example.com")  # its Take over… carries what it holds now
+    assert row[1] == "198.51.100.8" and row[-1]["values"] == {"host": "example.com", "holds": "198.51.100.8"}
 
 
 def test_a_host_taken_over_then_taken_out_of_the_setting_is_let_go(env):
@@ -121,6 +123,7 @@ def test_a_host_taken_over_then_taken_out_of_the_setting_is_let_go(env):
     env(settings_of(GOOGLECLOUD_DDNS_HOSTS="@.example.com"))
     fake, address = FakeGoogle(), [HOME]
     p = GoogleCloudPlugin(transport=fake, public=lambda: (address[0], "a stand-in"), sleep=lambda s: None)
+    p.app = Platform()  # the serving platform's plugin (its background not started here): the one that settles
     p.refresh()
     p.ddns_update(force=False)
     p.ddns_take_over("example.com", "198.51.100.7", True)
@@ -151,12 +154,36 @@ def test_a_refresh_lets_go_of_a_host_taken_out_while_the_plugin_was_not_running(
     assert p.keeper().known() == ["home.example.com"]
     env({"GOOGLECLOUD_DDNS_HOSTS": ""})  # taken out while no plugin ran
     again = GoogleCloudPlugin(transport=fake, public=lambda: (HOME, "a stand-in"), sleep=lambda s: None)
+    again.app = Platform()  # the serving platform's plugin: the one that settles
     fake.fail[("GET", r"/managedZones$")] = (503, {"error": {"code": 503, "message": "backend", "status": "UNAVAILABLE"}})
     again.refresh()  # the zones not read: nothing let go on a list left short
     assert again.keeper().known() == ["home.example.com"]
     del fake.fail[("GET", r"/managedZones$")]
     again.refresh()
     assert again.keeper().known() == []
+
+
+def test_only_the_serving_platform_settles(made, env):
+    """The plugin's own command line (and the platform's one-shot commands) runs where the setting may lack the hosts:
+    unattached, the setting emptied, what the keeper holds as its own is kept; under the serving platform it is let go."""
+    from plugin_platform_googlecloud.__main__ import main
+
+    env(settings_of(GOOGLECLOUD_DDNS_HOSTS="home.example.com"))
+    p, fake = made()
+    p.refresh()
+    p.ddns_update(force=False)
+    assert p.keeper().own("home.example.com") == HOME
+    env({"GOOGLECLOUD_DDNS_HOSTS": ""})  # a shell whose setting lacks the hosts
+    p.settings_changed()
+    p.refresh()
+    assert main(["status"], plugin=p, out=lambda s: None, err=lambda s: None) == 0
+    assert p.keeper().own("home.example.com") == HOME  # unattached: kept
+    p.app = type("Once", (), {"NAME": "platform", "once": True})()  # the platform's one-shot command: kept too
+    p.refresh()
+    assert p.keeper().own("home.example.com") == HOME
+    p.app = Platform()  # the serving platform: let go as before
+    p.refresh()
+    assert p.keeper().own("home.example.com") is None and p.keeper().known() == []
 
 
 def test_a_host_with_several_addresses_is_never_cut_to_one(made, env):
@@ -212,6 +239,7 @@ def test_a_host_taken_out_of_the_settings_is_let_go(made, env):
     p.refresh()
     p.ddns_update(force=False)
     assert p.keeper().own("home.example.com") == HOME
+    p.app = Platform()  # the serving platform's plugin: the one that settles
     env({"GOOGLECLOUD_DDNS_HOSTS": "@.example.com"})
     p.settings_changed()
     p.ddns_update(force=False)

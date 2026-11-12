@@ -122,12 +122,14 @@ record (it is made), one already pointing at this network, one holding the addre
 address changed, after a restart too: what is its own is kept in `googlecloud/ddns.json` under the platform's folder,
 `LIMINAL_PLATFORM_DIR`, else the data folder's `platform/`), and one you took over. Any other record, another address
 or several, is left as it is and said so, with **Take over…** on its row. A take-over sets the record at once and
-drops every address it holds, so it is asked twice, and refused when the record no longer holds what the page showed;
-then the host is pointed here and kept there. Several addresses are never cut to one unasked. Just before a write the address is asked
+drops every address it holds, so it is asked twice, and refused when the record no longer holds what the page showed
+(the row then offers what it holds now); then the host is pointed here and kept there, its own (the consent is used up
+once its write lands). Several addresses are never cut to one unasked. Just before a write the address is asked
 again, and the record read again: changed meanwhile to what is not its own, it is left as it is. Only hosts of the
 project's public zones are kept (a private zone answers inside its VPC networks alone); a host holding a CNAME is never
 written over. A host taken out of the setting, while the plugin ran or not, is let go (the keeper's `settle`, with the
-whole setting, once the project's zones are read): put back later, it is its own again only if it points here.
+whole setting, once the project's zones are read; by the serving platform alone, never by the command line, whose
+shell may not hold the setting): put back later, it is its own again only if it points here.
 
 ## Its API
 

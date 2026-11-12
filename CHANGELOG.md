@@ -2,7 +2,8 @@
 
 ## 0.1.2 (2026-11-11)
 
-What the re-verification of the audit's fixes found in Dynamic DNS (liminal-libs 1.49.7; needs liminal-libs>=1.49.7):
+What the re-verification of the audit's fixes found in Dynamic DNS (liminal-libs 1.49.7 and 1.49.8; needs
+liminal-libs>=1.49.8):
 
 - **Take over… is asked twice.** A take-over sets the host's A record at once and drops every address it holds, so
   `ddns_take_over(host, holds, accept_take_over)` passes the second confirmation on to the keeper, which refuses
@@ -11,6 +12,11 @@ What the re-verification of the audit's fixes found in Dynamic DNS (liminal-libs
 - **A host taken out of the setting is let go, while the plugin ran or not.** The keeper's `settle`, called with the
   whole Dynamic DNS setting by each pass and each refresh once the project's zones are read (never on a list left
   short because they are not), replaces the plugin's own let-go, which only knew a change made while it ran.
+- The third round of checks: only the serving platform settles (never the plugin's own command line nor the
+  platform's one-shot commands, whose shell's setting may lack the hosts and would empty the shared `ddns.json`); a
+  take-over is single-use (1.49.8: its consent used up once its write lands, the host then the keeper's own); and a
+  take-over refused because the record changed first reads it afresh, so the host's row and its Take over… offer what
+  it holds now.
 
 ## 0.1.1 (2026-11-11)
 
