@@ -51,7 +51,7 @@ from .card import APIS, BILLING_NAME, COMPUTE_NAME, DNS_NAME, OAUTH_NAME
 from .records import Refusal
 from .settings import CONSOLE_KEYS, DDNS_HOSTS, KEY, KEYS, NAMES, Config
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 REFRESH_S = 900.0  # the project read again at most this often while attached (or by Refresh)
 CONFIG_S = 30.0  # the settings asked of the login again after this long
 RETRY_S = 900.0  # a part that failed is taken as untried after this long while detached: attached again, it is tried again
@@ -201,6 +201,7 @@ class GoogleCloudPlugin(MachinePlugin):
     version = __version__
     order = 765
     ICON = "googlecloud"  # Google Cloud's mark (liminal-libs 1.49.0's icons.js)
+    SECTION = "cloud"  # drawn under the platform's Cloud plugins (liminal-libs 1.51.0, liminal-platform 0.25.0)
     HOOKS = (*MachinePlugin.HOOKS, "refresh", "servers", "start_server", "stop_server", "reset_server", "firewalls",
              "add_firewall_rule", "remove_firewall_rule", "domains", "records", "set_record", "remove_record",
              "ssh_keys", "add_ssh_key", "remove_ssh_key", "ddns_update", "ddns_take_over")
