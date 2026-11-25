@@ -51,7 +51,7 @@ from .card import APIS, BILLING_NAME, COMPUTE_NAME, DNS_NAME, OAUTH_NAME
 from .records import Refusal
 from .settings import CONSOLE_KEYS, DDNS_HOSTS, KEY, KEYS, NAMES, Config
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 REFRESH_S = 900.0  # the project read again at most this often while attached (or by Refresh)
 CONFIG_S = 30.0  # the settings asked of the login again after this long
 RETRY_S = 900.0  # a part that failed is taken as untried after this long while detached: attached again, it is tried again
@@ -528,24 +528,32 @@ class GoogleCloudPlugin(MachinePlugin):
                 "lines": [_op_line(done), f"it reaches {', '.join(reached) if reached else 'no server read'}",
                           "VPC firewall rules cost nothing (its logging is off)"]}
 
-    def remove_firewall_rule(self, name: str, accept_risky_removal=False) -> dict:
-        """A VPC firewall rule removed; the one letting SSH or RDP in to a server it reaches (or denying ingress to one)
-        only once that is accepted (asked twice)."""
+    def remove_firewall_rule(self, name: str, rule=None, accept_risky_removal=False) -> dict:
+        """A VPC firewall rule removed, once it is checked to be the one shown (`rule`: it in words as the page showed it,
+        firewall.describe, needed); the one letting SSH or RDP in to a server it reaches (or denying ingress to one) only
+        once that is accepted (asked twice)."""
         n = str(name or "").strip()
+        if rule in (None, ""):
+            # by its name alone, a rule changed since it was shown (another port, other addresses) went unseen (the
+            # review of 2026-11-21, item 26): Linode's and Vultr's removals carry the rule as shown, so does this one
+            raise ValueError(f"name the rule as it was shown ({n} in words), so a rule changed since is not removed unseen")
         api = self.client()
         rules = api.firewalls()
-        rule = next((r for r in rules if r.get("name") == n), None)
+        found = next((r for r in rules if r.get("name") == n), None)
         with self._rt.lock:
             self._rt.firewalls = rules
             instances = list(self._rt.instances)
-        if rule is None:
+        if found is None:
             raise Refusal(f"no firewall rule named {n!r} in the project")
-        risky = fw.risky_removal(rule, instances)
+        if fw.describe(found) != str(rule).strip():
+            raise Refusal(f"{n} is {fw.describe(found)} now, not {str(rule).strip()} as shown: nothing removed (the page "
+                          "shows it as read now)")
+        risky = fw.risky_removal(found, instances)
         if risky and not accepted(accept_risky_removal):
             raise Refusal(f"{risky}; removed only once that is accepted", accept=ACCEPT_REMOVE)
         done = api.wait_global(api.remove_firewall(n))
         self._reread_rules(api)
-        return {"said": f"removed {n} ({fw.describe(rule)})", "ok": True,
+        return {"said": f"removed {n} ({fw.describe(found)})", "ok": True,
                 "lines": [_op_line(done), "what it let in or kept out is decided by the rules left (a network denies "
                                           "ingress unless a rule allows it)"]}
 
@@ -1090,7 +1098,7 @@ class GoogleCloudPlugin(MachinePlugin):
                          cell(", ".join(reached[:6]) or "–", f"{len(reached) - 6} more" if len(reached) > 6 else None),
                          str(r.get("priority", 1000)), "off" if r.get("disabled") else "on",
                          {"form": "firewall:remove", "title": "Remove", "label": f"Remove {r.get('name')}",
-                          "values": {"name": r.get("name")}}])
+                          "values": {"name": r.get("name"), "rule": fw.describe(r)}}])
         return {"title": "Firewall rules", "note": ("the VPC rules of every network, the lowest priority first; a network "
                                                     "denies ingress unless a rule allows it · rules cost nothing"),
                 "columns": [{"title": "Rule"}, {"title": "Way"}, {"title": "Action"}, {"title": "Protocols"},
@@ -1310,11 +1318,12 @@ def _add_rule_form(networks: list[str]) -> dict:
 def _remove_rule_form() -> dict:
     return {"id": "firewall:remove", "hook": "remove_firewall_rule", "title": "Remove a VPC firewall rule",
             "fields": [{"name": "name", "label": "Rule", "type": "fixed"},
+                       {"name": "rule", "label": "As shown", "type": "fixed"},
                        {"name": ACCEPT_REMOVE, "type": "accept", "title": "Remove it anyway?", "yes": "Remove it anyway",
                         "words": ("Removing {name} may lock you out of the servers named (SSH or RDP), or let in what it "
                                   "kept out, until another rule is added.")}],
             "confirm": {"title": "Remove this rule?",
-                        "words": ("{name} is removed: what it allowed or denied is then decided by the rules left (a "
+                        "words": ("{name} ({rule}) is removed, unless it is another rule by now: what it allowed or denied is then decided by the rules left (a "
                                   "network denies ingress unless a rule allows it). A rule letting SSH or RDP in to a "
                                   "server, or denying ingress to one, is asked again."),
                         "yes": "Remove the rule", "danger": True}}

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.4 (2026-11-24)
+
+A firewall rule is removed only while it is the one shown (the review of 2026-11-21, item 26). `remove_firewall_rule`
+took the rule's name alone, so a rule changed since the page showed it (other ports, other addresses, another
+action) was removed unseen. It now carries the rule in words as shown (`rule`: `firewall.describe`, needed, as
+Linode's and Vultr's removals do): the Firewall rules table's Remove sends it, the form shows it ("As shown"), and a
+rule that reads otherwise now is refused, nothing sent. Test: a removal without the words refused; one whose rule
+changed after it was shown refused with nothing written; as read again, removed.
+
 ## 0.1.3 (2026-11-14)
 
 Drawn under the platform's Cloud plugins section, in the list on the left (the user: "classify the cloud plugins under the 'cloud plugins' section which should be on the far left"): `SECTION = "cloud"`. That is liminal-libs

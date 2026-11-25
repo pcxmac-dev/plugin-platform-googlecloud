@@ -127,7 +127,8 @@ def test_a_second_confirmation_counts_only_when_it_is_exactly_true(ready, given)
                                ("start_server", ("us-central1-a", "batch-1"), ACCEPT_COSTS),
                                ("add_firewall_rule", ("open-rdp", "default", "INGRESS", "allow", "tcp", "3389", "0.0.0.0/0",
                                                       None, None, None), ACCEPT_OPEN),
-                               ("remove_firewall_rule", ("default-allow-ssh",), ACCEPT_REMOVE)):
+                               ("remove_firewall_rule", ("default-allow-ssh", shown(p, "default-allow-ssh")),
+                                ACCEPT_REMOVE)):
         with pytest.raises(Refusal) as refused:
             p.ask(hook, *args, given)
         assert refused.value.accept == accept, hook
@@ -237,18 +238,45 @@ def test_removing_the_rule_letting_ssh_or_rdp_in_is_asked_twice(ready):
     f = forms["firewall:remove"]
     with pytest.raises(Refusal, match=r"default-allow-ssh lets SSH \(tcp:22\) in to batch-1, scratch-1, web-1: removing it "
                                       "may lock you out of them") as refused:
-        p.ask(f["hook"], *page_args(f, {"name": "default-allow-ssh"}))
+        p.ask(f["hook"], *page_args(f, row(p, "default-allow-ssh")))
     assert refused.value.accept == ACCEPT_REMOVE and "default-allow-ssh" in fake.firewalls and fake.writes() == []
     with pytest.raises(Refusal, match=r"allow-rdp lets RDP \(tcp:3389\) in to web-1: removing it may lock you out of it"):
-        p.ask(f["hook"], *page_args(f, {"name": "allow-rdp"}))
-    rep = p.ask(f["hook"], *page_args(f, {"name": "default-allow-ssh"}, accepted={ACCEPT_REMOVE}))
+        p.ask(f["hook"], *page_args(f, row(p, "allow-rdp")))
+    rep = p.ask(f["hook"], *page_args(f, row(p, "default-allow-ssh"), accepted={ACCEPT_REMOVE}))
     assert ("DELETE", f"{C}/global/firewalls/default-allow-ssh") in fake.calls() and rep["ok"]
     assert fake.requests[[r["method"] for r in fake.requests].index("DELETE")]["body"] is None
     assert "default-allow-ssh" not in fake.firewalls
-    p.ask(f["hook"], *page_args(f, {"name": "deny-smtp-out"}))  # an egress rule: one confirmation
+    p.ask(f["hook"], *page_args(f, row(p, "deny-smtp-out")))  # an egress rule: one confirmation
     assert "deny-smtp-out" not in fake.firewalls
     with pytest.raises(Refusal, match="no firewall rule named 'gone'"):
-        p.ask(f["hook"], *page_args(f, {"name": "gone"}))
+        p.ask(f["hook"], *page_args(f, {"name": "gone", "rule": "allow tcp:22"}))
+
+
+def shown(p, name: str) -> str:
+    """A rule in words as the page shows it (its row's Remove values)."""
+    return next(r["rule"] for r in p.firewalls() if r["name"] == name)
+
+
+def row(p, name: str) -> dict:
+    return {"name": name, "rule": shown(p, name)}
+
+
+def test_a_rule_is_removed_only_while_it_is_the_one_shown(ready):
+    """The review of 2026-11-21, item 26: a rule was removed by its name alone, whatever it had become since it was
+    shown. The removal carries it in words, as Linode's and Vultr's do, and is refused, nothing sent, when it differs."""
+    p, fake, forms = ready()
+    f = forms["firewall:remove"]
+    values = row(p, "deny-smtp-out")
+    assert values["rule"].startswith("deny tcp:25 out to")
+    with pytest.raises(ValueError, match="name the rule as it was shown"):
+        p.ask(f["hook"], "deny-smtp-out", None, False)
+    fake.firewalls["deny-smtp-out"]["denied"] = [{"IPProtocol": "tcp", "ports": ["25", "465"]}]  # changed since shown
+    with pytest.raises(Refusal, match=r"deny-smtp-out is deny tcp:25,465 .* now, not deny tcp:25 out to .* as shown: "
+                                      "nothing removed"):
+        p.ask(f["hook"], *page_args(f, values))
+    assert "deny-smtp-out" in fake.firewalls and fake.writes() == []
+    rep = p.ask(f["hook"], *page_args(f, row(p, "deny-smtp-out")))  # as read now: removed
+    assert rep["ok"] and "deny-smtp-out" not in fake.firewalls
 
 
 def test_a_failed_operation_is_said_in_googles_words(ready):
