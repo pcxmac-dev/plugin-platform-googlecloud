@@ -229,7 +229,10 @@ def test_a_record_changed_by_someone_else_during_a_pass_is_left_as_it_is(made, e
         return answer
     fake._route = meanwhile
     (host,) = p.ddns_update(force=False)["hosts"]
-    assert host["ok"] is False and host["result"] == "not updated: it changed meanwhile to 198.51.100.99: left as it is"
+    # left as it is, whichever sees it first: the plugin's own check, or the keeper's look again before the write
+    # (liminal-libs 1.80.0)
+    assert host["ok"] is False and "198.51.100.99" in host["result"]
+    assert "left as it is" in host["result"] or "nothing written" in host["result"]
     assert changes(fake) == [] and a_record(fake, "home.example.com.") == ["198.51.100.99"]
 
 
