@@ -190,6 +190,15 @@ ports, ranges, target_tags, priority, description, accept_open_to_internet=False
 `ddns_update(force=True)`, `ddns_take_over(host, holds=None, accept_take_over=False)`. A refused change raises a refusal naming the argument
 that accepts it, when one does (the page asks it as a second confirmation).
 
+**The changes are asked only from the plugin's page** (`PAGE_ONLY_HOOKS`, 0.1.5): `start_server`, `stop_server`,
+`reset_server`, `add_firewall_rule`, `remove_firewall_rule`, `set_record`, `remove_record`, `add_ssh_key`,
+`remove_ssh_key`, `ddns_update` and `ddns_take_over`. Another plugin's ask of one is refused, and over HTTP the platform
+refuses one unless its login shows that you are at the page (liminal-libs 1.66.0 and liminal-platform 0.34.0 read the
+word; what is older than those asks them as before). `present`, `status`, `refresh()` and the reads are asked by anyone.
+The plugin's own background (its reads, its Dynamic DNS passes) and its command line call the code themselves: they are
+not asks. The platform's check rests on its login's word that your browser is signed in, and a local login signs
+`secret` and `default` in with no password: it does not stop a program on this PC that signs itself in.
+
 ## From the command line
 
 Its settings read from the environment (as this shell has them); each change asks "yes" on the terminal first, a

@@ -13,7 +13,9 @@
     set ZONE NAME TYPE DATA [--ttl N]   a record set (every other record kept), asked "yes" first
     remove ZONE NAME TYPE DATA          a record's value removed, asked "yes" first
 
---json prints the answer as JSON. Firewall rules and SSH keys are changed from the platform's page."""
+--json prints the answer as JSON. Firewall rules and SSH keys are changed from the platform's page. The platform asks
+the plugin's changes only from its page (PAGE_ONLY_HOOKS, 0.1.5); this command line asks the platform nothing: it calls
+the same code in its own process, with this shell's settings, as before."""
 from __future__ import annotations
 
 import argparse

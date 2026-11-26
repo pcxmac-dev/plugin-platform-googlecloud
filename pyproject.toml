@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plugin-platform-googlecloud"
-version = "0.1.4"  # the plugin's own release (CHANGELOG.md); the platform shows it on the plugin's page
+version = "0.1.5"  # the plugin's own release (CHANGELOG.md); the platform shows it on the plugin's page
 description = "Google Cloud for Liminal's platform: a project's servers, disks, addresses, firewall rules, Cloud DNS zones and project-wide SSH keys through Google's APIs, the free changes each confirmed, and Dynamic DNS through Cloud DNS."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -24,6 +24,14 @@ but the web's 80 and 443 in from the whole internet, asked twice; Dynamic DNS th
 holding another address left as it is until taken over); a pass ending once the plugin is detached; a second
 confirmation counted only when it is exactly true.
 
+Who may ask its changes (0.1.5; the independent review's PLT-H1 and the sweep of the plugins after it, 2026-11-25): a
+server started, stopped or reset, a firewall rule added or removed, a record set or removed, a project-wide SSH key added
+or removed, a Dynamic DNS pass and a host taken over are asked only from its page (PAGE_ONLY_HOOKS): another plugin's ask
+is refused, and the platform asks its login whether you are at the page. Before, any program on this PC could ask them of
+the platform with a header anyone can send, and the service account's key did the rest; a second confirmation is an
+argument the asker sets. Its reads are asked by anyone. The background and the command line call the same code
+themselves: those are not asks.
+
     python -m plugin_platform_googlecloud status | servers | domains | records ZONE | ddns [--now] | firewalls | keys
         | power NAME on|off|reboot | set ZONE NAME TYPE DATA [--ttl N] | remove ZONE NAME TYPE DATA
 """
@@ -51,7 +59,7 @@ from .card import APIS, BILLING_NAME, COMPUTE_NAME, DNS_NAME, OAUTH_NAME
 from .records import Refusal
 from .settings import CONSOLE_KEYS, DDNS_HOSTS, KEY, KEYS, NAMES, Config
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 REFRESH_S = 900.0  # the project read again at most this often while attached (or by Refresh)
 CONFIG_S = 30.0  # the settings asked of the login again after this long
 RETRY_S = 900.0  # a part that failed is taken as untried after this long while detached: attached again, it is tried again
@@ -205,6 +213,16 @@ class GoogleCloudPlugin(MachinePlugin):
     HOOKS = (*MachinePlugin.HOOKS, "refresh", "servers", "start_server", "stop_server", "reset_server", "firewalls",
              "add_firewall_rule", "remove_firewall_rule", "domains", "records", "set_record", "remove_record",
              "ssh_keys", "add_ssh_key", "remove_ssh_key", "ddns_update", "ddns_take_over")
+    # Its changes, asked only from its page (0.1.5, the sweep after the review's PLT-H1; liminal-libs 1.66.0's
+    # apps/asking.py): another plugin's ask is refused (403), and liminal-platform 0.34.0 refuses one over HTTP (401)
+    # unless its login shows that you are at the page. Before, any program on this PC could ask them of the platform with
+    # a header anyone can send, the page's dialogs being the only confirmation (a second one, accept_costs or
+    # accept_open_to_internet, is an argument the asker sets): a project-wide SSH key added (a login with sudo on the
+    # servers that take them), a server stopped or started, a firewall opened, with your service account's key. The
+    # background's reads and Dynamic DNS passes and the command line call the code directly, not through an ask; its reads
+    # (refresh and the lists among them) are asked by anyone.
+    PAGE_ONLY_HOOKS = ("start_server", "stop_server", "reset_server", "add_firewall_rule", "remove_firewall_rule",
+                       "set_record", "remove_record", "add_ssh_key", "remove_ssh_key", "ddns_update", "ddns_take_over")
     keys = KEYS
     signup = CONSOLE_KEYS
     limits = ("Compute Engine: rate quotas per project and minute (its Quotas page), 36 project metadata writes a "
