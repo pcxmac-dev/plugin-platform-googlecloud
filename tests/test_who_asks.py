@@ -7,7 +7,8 @@ Before, any program on this PC asked them of the platform with a header anyone c
 did the rest: a key of the asker's added to the project's SSH keys (a login with sudo on every server that takes them)
 and a server stopped with no second question at all; a stopped server started (its charges resumed), RDP opened to the
 whole internet and the rule letting SSH in removed, each second confirmation being only an argument. Its reads are asked
-by anyone, as before. Asked through the library's own App (its ask names who asks as the platform's does), over the
+asked only from its page too since 0.1.6 (closed by default: the account's key makes them; `present` and
+`status` alone are anyone's). Asked through the library's own App (its ask names who asks as the platform's does), over the
 stand-in Google: nothing reaches Google or the network."""
 from __future__ import annotations
 
@@ -26,6 +27,11 @@ from plugin_platform_googlecloud.sshkeys import fingerprint_of  # noqa: E402
 CHANGES = ("start_server", "stop_server", "reset_server", "add_firewall_rule", "remove_firewall_rule", "set_record",
            "remove_record", "add_ssh_key", "remove_ssh_key", "ddns_update", "ddns_take_over")
 READS = ("present", "status", "refresh", "servers", "firewalls", "domains", "records", "ssh_keys")
+# 0.1.6, closed by default (the user, 2026-11-26: "Page-only"): the reads made with the account's key are its
+# page's alone too; the contract's own two stay anyone's
+OPEN_READS = ("present", "status")
+PAGE_READS = tuple(h for h in READS if h not in OPEN_READS)
+READ_ARGS = {'records': ('example-com',)}  # the argument a read takes, as another program words it
 HOSTS = "new.example.com, @.example.com"  # Dynamic DNS's: one with no record yet, the domain itself holding another address
 ALLOW_SSH = fw.describe(FakeGoogle().firewalls["default-allow-ssh"])  # the rule in words, as any read shows it
 ASKED = {  # each change as another program worded it: the hook's arguments, a second confirmation said where it has one
@@ -101,17 +107,17 @@ def attached(made):
     app.detach(plugin.name)
 
 
-def test_its_changes_are_said_to_be_asked_only_from_its_page_and_its_reads_by_anyone():
-    assert set(internal.page_only(MACHINE)) == set(CHANGES)  # what the platform reads
+def test_its_changes_are_said_to_be_asked_only_from_its_page_and_its_reads_with_the_key_too():
+    assert set(internal.page_only(MACHINE)) == {*CHANGES, *PAGE_READS}  # what the platform reads
     assert internal.plugin_only(MACHINE) == ()
     assert internal.problems(MACHINE) == []  # each a hook of its own, and someone may ask it
     assert set(CHANGES) | set(READS) == set(MACHINE.interface()["hooks"]) and set(ASKED) == set(CHANGES)
-    for hook in CHANGES:
+    for hook in (*CHANGES, *PAGE_READS):
         assert asking.refusal(MACHINE, hook, asking.PAGE) == ""
         assert asking.refusal(MACHINE, hook, "neighbour") == (f"googlecloud's {hook} is asked only from its page, "
                                                               "never by another plugin: neighbour asked it.")
         assert asking.refusal(MACHINE, hook, None).endswith("This ask names no asker: neither the page nor a plugin.")
-    for hook in READS:
+    for hook in OPEN_READS:
         assert {asking.refusal(MACHINE, hook, who) for who in (asking.PAGE, "neighbour", None)} == {""}
 
 
@@ -121,11 +127,15 @@ def test_another_plugin_or_no_one_asking_a_change_sends_nothing_and_its_page_doe
         for ask in (neighbour.wants, app.on_its_own):
             with pytest.raises(asking.AskRefused, match=f"googlecloud's {hook} is asked only from its page"):
                 ask(hook, *ASKED[hook])
+    for hook in PAGE_READS:  # 0.1.6: a read made with the key is refused them too, and nothing is sent for it
+        for ask in (neighbour.wants, app.on_its_own):
+            with pytest.raises(asking.AskRefused, match=f"googlecloud's {hook} is asked only from its page"):
+                ask(hook, *READ_ARGS.get(hook, ()))
     assert fake.requests == []  # nothing sent, nor read: not a token asked for, not the read a change makes first
-    assert neighbour.wants("present") is True and neighbour.wants("status")["valid"] is True  # its reads, as before
-    assert app.on_its_own("refresh") is not None
-    assert [s["name"] for s in neighbour.wants("servers")] == ["web-1", "batch-1", "scratch-1"]
-    assert len(neighbour.wants("records", "example-com")) == 8 and fake.writes() == []  # a row a value
+    assert neighbour.wants("present") is True and neighbour.wants("status")["valid"] is True  # the contract's reads, anyone's as before
+    assert app.from_page("refresh") is not None
+    assert [s["name"] for s in app.from_page("servers")] == ["web-1", "batch-1", "scratch-1"]
+    assert len(app.from_page("records", "example-com")) == 8 and fake.writes() == []  # a row a value
     for hook in CHANGES:  # the same asks from its page: each one sent
         sent = len(fake.writes())
         assert app.from_page(hook, *ASKED[hook]) is not None
@@ -145,3 +155,18 @@ def test_its_own_code_asks_nothing_of_the_app_and_runs_as_before(attached):
     new, apex = plugin.ddns_update(force=False)["hosts"]
     assert new["ok"] is True and apex["foreign"] is True
     assert sent_by(fake) == [("POST", DNS)]
+
+
+def test_no_hook_is_left_undeclared():
+    """0.1.6, closed by default (liminal-libs 1.107.0): every hook it answers says who may ask it, so none is left to
+    the default and the library's conformance has no warning. Read from its words, so it holds on an older library."""
+    from liminal_libs.sources import conformance
+
+    said = {h for word in ("READ_HOOKS", "SERVICE_HOOKS", "PLUGIN_ONLY_HOOKS", "PAGE_ONLY_HOOKS")
+            for h in internal.declared(MACHINE, word)}
+    own = [h for h in MACHINE.interface()["hooks"] if h not in ("setup", "run", "scan")]
+    assert own and [h for h in own if h not in said] == []
+    assert set(PAGE_READS) <= set(internal.declared(MACHINE, "PAGE_ONLY_HOOKS"))
+    assert not set(PAGE_READS) & set(internal.declared(MACHINE, "READ_HOOKS"))  # none is opened again as a read
+    warnings = getattr(conformance, "warnings", None)  # liminal-libs 1.107.0
+    assert warnings is None or warnings(MACHINE) == []
